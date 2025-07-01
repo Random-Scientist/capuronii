@@ -11,11 +11,9 @@ use typed_index_collections::{TiSlice, TiVec, ti_vec};
 use crate::{
     alloc::{StackAlloc, StackState},
     function::CompilingFunction,
-    list::{Broadcast, Filter, ListDef, Piecewise, ScalarSequence},
 };
 mod alloc;
 mod function;
-mod list;
 #[cfg(test)]
 mod test;
 struct TyContext {
