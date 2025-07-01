@@ -1,0 +1,9 @@
+[package]
+name = "capuronii"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ambavia = { git = "https://github.com/fadaaszhi/ambavia", rev = "855f8fbad44a16b45b5519cdbc5c4b14552f4835" }
+naga = { version = "25.0.1", features = ["msl-out", "hlsl-out"] }
+typed-index-collections = "3.3.0"
