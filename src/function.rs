@@ -6,7 +6,7 @@ use std::{
 use ambavia::type_checker::BaseType;
 use naga::{
     Block, Expression, Function, FunctionArgument, FunctionResult, Handle, LocalVariable, Span,
-    Statement,
+    Statement, Type,
 };
 
 use crate::{ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc};
@@ -15,14 +15,14 @@ const POINT_SIZE: u32 = 2;
 
 #[derive(Debug)]
 pub struct CompilingFunction {
-    one_u32: Handle<Expression>,
+    pub(crate) zero_u32: Handle<Expression>,
+    pub(crate) one_u32: Handle<Expression>,
     last_emit: usize,
     func: Function,
     // pointer to stack head
     pub(crate) stack_head: Handle<Expression>,
     // pointer to stack buffer (ptr<device, [u32]>)
     pub(crate) stack_ptr: Handle<Expression>,
-    block: Block,
 }
 impl Deref for CompilingFunction {
     type Target = Function;
@@ -100,7 +100,7 @@ impl CompilingFunction {
                 index: 2,
             }),
         );
-        let (num_x, num_y, num_z) = (
+        let (num_x, num_y) = (
             func.add_unspanned(naga::Expression::AccessIndex {
                 base: num_workgroups,
                 index: 0,
@@ -108,10 +108,6 @@ impl CompilingFunction {
             func.add_unspanned(naga::Expression::AccessIndex {
                 base: num_workgroups,
                 index: 1,
-            }),
-            func.add_unspanned(naga::Expression::AccessIndex {
-                base: num_workgroups,
-                index: 2,
             }),
         );
         let y = func.add_unspanned(Expression::Binary {
@@ -142,12 +138,12 @@ impl CompilingFunction {
         let heap_per_invocation = func.add_preemit(naga::Expression::Literal(naga::Literal::U32(
             ctx.heap_per_invocation,
         )));
-        let heap_offset = naga::Expression::Binary {
+        let heap_offset = func.add_unspanned(naga::Expression::Binary {
             op: naga::BinaryOperator::Multiply,
             left: flattened_inv_id,
             right: heap_per_invocation,
-        };
-        func.store_local(stack_base, heap_offset.clone());
+        });
+        func.store_local(stack_base, heap_offset);
         func.store_local(stack_head, heap_offset);
         func.push_frame(ctx);
         func
@@ -163,6 +159,9 @@ impl CompilingFunction {
         stack_head: Handle<Expression>,
         stack_ptr: Handle<Expression>,
     ) -> Self {
+        let zero_u32 = func
+            .expressions
+            .add_unspanned(Expression::Literal(naga::Literal::U32(0)));
         let one_u32 = func
             .expressions
             .add_unspanned(Expression::Literal(naga::Literal::U32(1)));
@@ -170,8 +169,8 @@ impl CompilingFunction {
             last_emit: 0,
             func,
             stack_head,
-            block: Block::new(),
             stack_ptr,
+            zero_u32,
             one_u32,
         }
     }
@@ -203,10 +202,9 @@ impl CompilingFunction {
             .expressions
             .add_unspanned(Expression::Load { pointer })
     }
-    pub(crate) fn store_local(&mut self, pointer: Handle<Expression>, value: Expression) {
-        let value = self.add_unspanned(value);
+    pub(crate) fn store_local(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
         self.emit_exprs();
-        self.block
+        self.body
             .push(Statement::Store { pointer, value }, Span::UNDEFINED);
     }
     /// stores a raw value (uint/u32) to a raw offset within a stack allocation
@@ -232,7 +230,7 @@ impl CompilingFunction {
             index: offset,
         });
         self.emit_exprs();
-        self.block.push(
+        self.body.push(
             Statement::Store {
                 pointer: item_ptr,
                 value,
@@ -268,10 +266,8 @@ impl CompilingFunction {
         self.last_emit = self.func.expressions.len();
     }
     pub(crate) fn emit_exprs(&mut self) {
-        self.block.push(
-            Statement::Emit(self.func.expressions.range_from(self.last_emit)),
-            Span::UNDEFINED,
-        );
+        let range = self.func.expressions.range_from(self.last_emit);
+        self.body.push(Statement::Emit(range), Span::UNDEFINED);
         self.last_emit = self.func.expressions.len();
     }
     pub(crate) fn new_scalar_assignment(
@@ -280,22 +276,35 @@ impl CompilingFunction {
         id: usize,
         scalar: BaseType,
     ) -> Handle<naga::Expression> {
-        // todo allow mapping assignment name
-        let local_handle = self.local_variables.add_unspanned(LocalVariable {
-            name: None,
-            ty: ctx.map_scalar(scalar),
-            init: None,
-        });
-        let x = self.add_preemit(Expression::LocalVariable(local_handle));
+        let x = self.new_local(ctx.map_scalar(scalar), None);
         ctx.scalar_assignments.insert(id, x);
         x
     }
-    pub(crate) fn done(mut self, ctx: &mut Compiler) -> Function {
+
+    pub(crate) fn new_local(
+        &mut self,
+        ty: Handle<Type>,
+        init: Option<Handle<Expression>>,
+    ) -> Handle<Expression> {
+        let local_handle = self.local_variables.add_unspanned(LocalVariable {
+            name: None,
+            ty,
+            init,
+        });
+        self.add_preemit(Expression::LocalVariable(local_handle))
+    }
+    pub(crate) fn done(mut self, ctx: &mut Compiler, ret: ScalarRef) -> Function {
         self.pop_frame(ctx);
-        self.func.body = self.block;
+        self.result = Some()
+        self.body.push(
+            naga::Statement::Return {
+                value: Some(ret.inner),
+            },
+            naga::Span::UNDEFINED,
+        );
         self.func
     }
-    pub(crate) fn compute_list_len(&mut self, r: StackList) -> Handle<Expression> {
+    pub(crate) fn compute_list_len(&mut self, r: &StackList) -> Handle<Expression> {
         let mut h = r.inner.len;
         if r.ty == BaseType::Point {
             let two = self.add_preemit(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
@@ -405,10 +414,16 @@ impl CompilingFunction {
         })
     }
     pub(crate) fn make_index(&mut self, number: Handle<Expression>) -> Handle<Expression> {
-        self.add_unspanned(Expression::As {
+        let cast = self.add_unspanned(Expression::As {
             expr: number,
             kind: naga::ScalarKind::Uint,
             convert: Some(4),
+        });
+        // desmos is one-indexed :evilcat:
+        self.add_unspanned(Expression::Binary {
+            op: naga::BinaryOperator::Add,
+            left: cast,
+            right: self.one_u32,
         })
     }
 }

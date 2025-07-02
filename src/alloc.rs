@@ -1,7 +1,7 @@
 use naga::{BinaryOperator, Expression, Handle, Literal};
 
 use crate::{Compiler, function::CompilingFunction};
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct StackAlloc {
     #[cfg(debug_assertions)]
     /// frame idx, generation
@@ -47,22 +47,18 @@ impl StackState {
 
 impl CompilingFunction {
     pub(crate) fn push_frame(&mut self, ctx: &mut Compiler) {
-        let zero = self.add_preemit(Expression::Literal(Literal::U32(0)));
-        ctx.stack.push_frame(zero);
+        ctx.stack.push_frame(self.zero_u32);
     }
     pub(crate) fn pop_frame(&mut self, ctx: &mut Compiler) {
-        self.emit_exprs();
+        //self.emit_exprs();
         let pop_amount = ctx.stack.pop_frame();
         let load = self.load(self.stack_head);
-
-        self.store_local(
-            self.stack_head,
-            Expression::Binary {
-                op: BinaryOperator::Subtract,
-                left: load,
-                right: pop_amount,
-            },
-        );
+        let new_val = self.add_unspanned(Expression::Binary {
+            op: BinaryOperator::Subtract,
+            left: load,
+            right: pop_amount,
+        });
+        self.store_local(self.stack_head, new_val);
     }
     pub(crate) fn alloc(&mut self, ctx: &mut Compiler, req_len: Handle<Expression>) -> StackAlloc {
         let new_size = self.add_unspanned(Expression::Binary {
@@ -72,14 +68,12 @@ impl CompilingFunction {
         });
         *ctx.stack.frame_size_tallies.last_mut().unwrap() = new_size;
         let read = self.load(self.stack_head);
-        self.store_local(
-            self.stack_head,
-            Expression::Binary {
-                op: BinaryOperator::Add,
-                left: read,
-                right: req_len,
-            },
-        );
+        let new_val = self.add_unspanned(Expression::Binary {
+            op: BinaryOperator::Add,
+            left: read,
+            right: req_len,
+        });
+        self.store_local(self.stack_head, new_val);
         #[cfg(debug_assertions)]
         StackAlloc {
             #[cfg(debug_assertions)]
@@ -89,6 +83,7 @@ impl CompilingFunction {
         }
     }
     #[track_caller]
+    // actual deallocation is performed by pop_frame, this is only for validating codegen
     pub(crate) fn dealloc(&mut self, ctx: &mut Compiler, a: StackAlloc) {
         #[cfg(debug_assertions)]
         {
