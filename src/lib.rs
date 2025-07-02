@@ -176,13 +176,8 @@ impl Compiler {
         let mut func = CompilingFunction::new_primary(self);
         let ret = compile_scalar(self, &mut func, expr);
 
-        let mut func = func.done(self);
-        func.body.push(
-            naga::Statement::Return {
-                value: Some(ret.inner),
-            },
-            naga::Span::UNDEFINED,
-        );
+
+        let mut func = func.done(self, ret: ScalarRef);
         self.module.functions.add_unspanned(func)
     }
     fn map_scalar(&self, scalar: BaseType) -> Handle<naga::Type> {
