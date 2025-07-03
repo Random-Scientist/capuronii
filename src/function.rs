@@ -21,6 +21,8 @@ pub struct CompilingFunction {
     func: Function,
     // pointer to stack head
     pub(crate) stack_head: Handle<Expression>,
+    // cache the current stack head when it hasn't been modified to avoid redundant loads
+    stack_head_cache: Option<Handle<Expression>>,
     // pointer to stack buffer (ptr<device, [u32]>)
     pub(crate) stack_ptr: Handle<Expression>,
 }
@@ -172,7 +174,22 @@ impl CompilingFunction {
             stack_ptr,
             zero_u32,
             one_u32,
+            stack_head_cache: None,
         }
+    }
+    pub(crate) fn load_stack_head(&mut self) -> Handle<Expression> {
+        match self.stack_head_cache {
+            Some(v) => v,
+            None => {
+                let v = self.load(self.stack_head);
+                self.stack_head_cache = Some(v);
+                v
+            }
+        }
+    }
+    pub(crate) fn store_stack_head(&mut self, new_value: Handle<Expression>) {
+        self.stack_head_cache = None;
+        self.store_local(self.stack_head, new_value);
     }
     pub(crate) fn bitcast_to_u32(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
         self.add_unspanned(Expression::As {
@@ -214,17 +231,12 @@ impl CompilingFunction {
         index: Handle<Expression>,
         value: Handle<Expression>,
     ) {
-        let offset_idx = self.add_unspanned(Expression::Binary {
+        let offset = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
             left: alloc.base_addr,
             right: index,
         });
-        let head = self.load(self.stack_head);
-        let offset = self.add_unspanned(Expression::Binary {
-            op: naga::BinaryOperator::Add,
-            left: head,
-            right: offset_idx,
-        });
+
         let item_ptr = self.add_unspanned(Expression::Access {
             base: self.stack_ptr,
             index: offset,
@@ -244,17 +256,12 @@ impl CompilingFunction {
         alloc: &StackAlloc,
         index: Handle<Expression>,
     ) -> Handle<Expression> {
-        let offset_idx = self.add_unspanned(Expression::Binary {
+        let offset = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
             left: alloc.base_addr,
             right: index,
         });
-        let head = self.load(self.stack_head);
-        let offset = self.add_unspanned(Expression::Binary {
-            op: naga::BinaryOperator::Add,
-            left: head,
-            right: offset_idx,
-        });
+
         let item_ptr = self.add_unspanned(Expression::Access {
             base: self.stack_ptr,
             index: offset,
@@ -276,7 +283,7 @@ impl CompilingFunction {
         id: usize,
         scalar: BaseType,
     ) -> Handle<naga::Expression> {
-        let x = self.new_local(ctx.map_scalar(scalar), None);
+        let x = self.new_local(ctx.scalar_type(scalar), None);
         ctx.scalar_assignments.insert(id, x);
         x
     }
@@ -295,7 +302,10 @@ impl CompilingFunction {
     }
     pub(crate) fn done(mut self, ctx: &mut Compiler, ret: ScalarRef) -> Function {
         self.pop_frame(ctx);
-        self.result = Some()
+        self.result = Some(FunctionResult {
+            ty: ctx.scalar_type(ret.ty),
+            binding: None,
+        });
         self.body.push(
             naga::Statement::Return {
                 value: Some(ret.inner),

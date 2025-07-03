@@ -176,11 +176,10 @@ impl Compiler {
         let mut func = CompilingFunction::new_primary(self);
         let ret = compile_scalar(self, &mut func, expr);
 
-
-        let mut func = func.done(self, ret: ScalarRef);
+        let mut func = func.done(self, ret);
         self.module.functions.add_unspanned(func)
     }
-    fn map_scalar(&self, scalar: BaseType) -> Handle<naga::Type> {
+    fn scalar_type(&self, scalar: BaseType) -> Handle<naga::Type> {
         match scalar {
             BaseType::Number => self.ty_ctx.f32,
             BaseType::Point => self.ty_ctx.point,
@@ -228,7 +227,7 @@ fn materialize_list(
             for scalar in scalars {
                 let val = compile_scalar(c, func, &scalar.value).inner;
 
-                let local = func.new_local(c.map_scalar(scalar.value.ty.base()), Some(val));
+                let local = func.new_local(c.scalar_type(scalar.value.ty.base()), Some(val));
                 c.scalar_assignments.insert(scalar.id, local);
             }
             let lists = vectors

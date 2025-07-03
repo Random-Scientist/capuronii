@@ -52,13 +52,13 @@ impl CompilingFunction {
     pub(crate) fn pop_frame(&mut self, ctx: &mut Compiler) {
         //self.emit_exprs();
         let pop_amount = ctx.stack.pop_frame();
-        let load = self.load(self.stack_head);
+        let load = self.load_stack_head();
         let new_val = self.add_unspanned(Expression::Binary {
             op: BinaryOperator::Subtract,
             left: load,
             right: pop_amount,
         });
-        self.store_local(self.stack_head, new_val);
+        self.store_stack_head(new_val);
     }
     pub(crate) fn alloc(&mut self, ctx: &mut Compiler, req_len: Handle<Expression>) -> StackAlloc {
         let new_size = self.add_unspanned(Expression::Binary {
@@ -67,13 +67,13 @@ impl CompilingFunction {
             right: req_len,
         });
         *ctx.stack.frame_size_tallies.last_mut().unwrap() = new_size;
-        let read = self.load(self.stack_head);
+        let read = self.load_stack_head();
         let new_val = self.add_unspanned(Expression::Binary {
             op: BinaryOperator::Add,
             left: read,
             right: req_len,
         });
-        self.store_local(self.stack_head, new_val);
+        self.store_stack_head(new_val);
         #[cfg(debug_assertions)]
         StackAlloc {
             #[cfg(debug_assertions)]
