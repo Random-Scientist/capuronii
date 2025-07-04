@@ -12,7 +12,7 @@ use crate::compile;
 
 #[test]
 fn test_to_mtl() {
-    let tex = r"a = (([(1,2), (3,4)] * 2))[3]";
+    let tex = r"c = [(a, b) \operatorname{for} a = [1,2,3,4] , b = [1,3,5]][2]";
     let tex = latex_parser::parse_latex(tex).unwrap();
     let expr = parse_expression_list_entry(&tex).unwrap();
     let (a, b) = resolve_names(&ti_vec![expr]);

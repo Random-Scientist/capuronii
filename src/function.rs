@@ -145,8 +145,8 @@ impl CompilingFunction {
             left: flattened_inv_id,
             right: heap_per_invocation,
         });
-        func.store_local(stack_base, heap_offset);
-        func.store_local(stack_head, heap_offset);
+        func.store(stack_base, heap_offset);
+        func.store(stack_head, heap_offset);
         func.push_frame(ctx);
         func
     }
@@ -189,7 +189,7 @@ impl CompilingFunction {
     }
     pub(crate) fn store_stack_head(&mut self, new_value: Handle<Expression>) {
         self.stack_head_cache = None;
-        self.store_local(self.stack_head, new_value);
+        self.store(self.stack_head, new_value);
     }
     pub(crate) fn bitcast_to_u32(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
         self.add_unspanned(Expression::As {
@@ -219,7 +219,7 @@ impl CompilingFunction {
             .expressions
             .add_unspanned(Expression::Load { pointer })
     }
-    pub(crate) fn store_local(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
+    pub(crate) fn store(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
         self.emit_exprs();
         self.body
             .push(Statement::Store { pointer, value }, Span::UNDEFINED);
@@ -284,8 +284,11 @@ impl CompilingFunction {
         scalar: BaseType,
     ) -> Handle<naga::Expression> {
         let x = self.new_local(ctx.scalar_type(scalar), None);
-        ctx.scalar_assignments.insert(id, x);
+        ctx.assignments.insert(id, crate::Assignment::Scalar(x));
         x
+    }
+    pub(crate) fn new_list_assignment(&mut self, ctx: &mut Compiler, id: usize, a: &StackAlloc) {
+        ctx.assignments.insert(id, crate::Assignment::List(*a));
     }
 
     pub(crate) fn new_local(

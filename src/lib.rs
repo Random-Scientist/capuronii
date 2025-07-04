@@ -1,4 +1,7 @@
-use std::{collections::HashMap, mem};
+use std::{
+    collections::HashMap,
+    mem::{self, discriminant},
+};
 
 use ambavia::type_checker::{self, BaseType, TypedExpression};
 use naga::{
@@ -48,7 +51,7 @@ struct RangeList {
 }
 
 struct Compiler {
-    assignments: HashMap<usize, type_checker::Assignment>,
+    global_assignments: HashMap<usize, type_checker::Assignment>,
     module: Module,
     ty_ctx: TyContext,
     uniforms: Handle<GlobalVariable>,
@@ -56,8 +59,7 @@ struct Compiler {
     heap_per_invocation: u32,
     stack: StackState,
     // each value in the map is of type ptr<function, Scalar> and points to a local unique to a given assignment binding
-    pub(crate) scalar_assignments: HashMap<usize, Handle<naga::Expression>>,
-    pub(crate) list_assignments: HashMap<usize, StackList>,
+    pub(crate) assignments: HashMap<usize, Assignment>,
 }
 
 /// Index into the currently bound constant/input buffer. The value at this index at the time of invocation contains the indirect address of the value
@@ -165,10 +167,9 @@ impl Compiler {
             uniforms,
             list_buf,
             stack,
-            assignments: global_assignments,
+            global_assignments,
             heap_per_invocation,
-            scalar_assignments: HashMap::new(),
-            list_assignments: HashMap::new(),
+            assignments: HashMap::new(),
         }
     }
 
@@ -200,7 +201,12 @@ fn materialize_list(
     expr: &TypedExpression,
 ) -> StackList {
     match &expr.e {
-        type_checker::Expression::Identifier(i) => *c.list_assignments.get(i).unwrap(),
+        type_checker::Expression::Identifier(i) => {
+            let Assignment::List(a) = *c.assignments.get(i).unwrap() else {
+                panic!()
+            };
+            StackList::new(expr.ty.base(), a)
+        }
         type_checker::Expression::List(typed_expressions) => {
             let len = func.add_preemit(naga::Expression::Literal(naga::Literal::U32(
                 typed_expressions.len() as u32,
@@ -225,10 +231,9 @@ fn materialize_list(
             body,
         } => {
             for scalar in scalars {
-                let val = compile_scalar(c, func, &scalar.value).inner;
-
-                let local = func.new_local(c.scalar_type(scalar.value.ty.base()), Some(val));
-                c.scalar_assignments.insert(scalar.id, local);
+                let value = compile_scalar(c, func, &scalar.value).inner;
+                let local = func.new_scalar_assignment(c, scalar.id, scalar.value.ty.base());
+                func.store(local, value);
             }
             let lists = vectors
                 .iter()
@@ -276,10 +281,12 @@ fn materialize_list(
             for (assignment_pointer, list) in lists.iter() {
                 // assign varyings
                 let access = func.load_typed(c, list, iter_idx);
-                func.store_local(*assignment_pointer, access.inner);
+                func.store(*assignment_pointer, access.inner);
             }
             let res = compile_scalar(c, func, body);
             func.store_typed(&out, iter_idx, res);
+            // end stack frame, we already stored out the result we care about
+            func.pop_frame(c);
 
             let next_idx = func.increment(iter_idx);
             let should_break = func.add_unspanned(naga::Expression::Binary {
@@ -299,7 +306,7 @@ fn materialize_list(
                 naga::Span::UNDEFINED,
             );
             // increment index
-            func.store_local(index, next_idx);
+            func.store(index, next_idx);
 
             mem::swap(&mut prev_body, &mut func.body);
             func.body.push(
@@ -338,7 +345,128 @@ fn materialize_list(
         } => {
             todo!()
         }
-        type_checker::Expression::For { body, lists } => todo!(),
+        type_checker::Expression::For { body, lists } => {
+            let lists = lists
+                .iter()
+                .map(|a| {
+                    let l = materialize_list(c, func, &a.value);
+
+                    (func.new_scalar_assignment(c, a.id, l.ty), l)
+                })
+                .collect::<Vec<_>>();
+            let mut out_len = None;
+            let mut lengths = Vec::new();
+
+            for (id, l) in lists.iter() {
+                let this_len = func.compute_list_len(l);
+                lengths.push(this_len);
+                if let Some(l) = out_len {
+                    out_len = Some(func.add_unspanned(naga::Expression::Binary {
+                        op: naga::BinaryOperator::Multiply,
+                        left: l,
+                        right: this_len,
+                    }));
+                } else {
+                    out_len = Some(this_len);
+                }
+            }
+            // allocate output list
+            let len = out_len.unwrap();
+            let out = func.alloc_list(c, expr.ty.base(), len);
+
+            let index = func.new_local(c.ty_ctx.u32, Some(func.zero_u32));
+
+            // barrier
+            func.emit_exprs();
+
+            // compile into a new block
+            let mut prev_body = mem::take(&mut func.body);
+
+            // new stack frame for comprehension body
+            func.push_frame(c);
+
+            // bind varyings
+            let mut prev_section_len = func.one_u32;
+            let iter_index = func.load(index);
+            for ((local, value), length) in lists.iter().zip(lengths) {
+                // integer division truncates towards zero, which is equivalent to `div_floor` for whole number values
+                let div = func.add_unspanned(naga::Expression::Binary {
+                    op: naga::BinaryOperator::Divide,
+                    left: iter_index,
+                    right: prev_section_len,
+                });
+                let index = func.add_unspanned(naga::Expression::Binary {
+                    op: naga::BinaryOperator::Modulo,
+                    left: div,
+                    right: length,
+                });
+                prev_section_len = func.add_preemit(naga::Expression::Binary {
+                    op: naga::BinaryOperator::Multiply,
+                    left: prev_section_len,
+                    right: length,
+                });
+                let val = func.load_typed(c, value, index);
+                func.store(*local, val.inner);
+            }
+
+            // bind assignments
+            for assignment in body.assignments.iter() {
+                if assignment.value.ty.is_list() {
+                    let list = materialize_list(c, func, &assignment.value);
+                    func.new_list_assignment(c, assignment.id, &list.inner);
+                } else {
+                    let p =
+                        func.new_scalar_assignment(c, assignment.id, assignment.value.ty.base());
+                    //new frame for scalar eval
+                    func.push_frame(c);
+                    let val = compile_scalar(c, func, &assignment.value);
+                    // assign out
+                    func.store(p, val.inner);
+                    // discard stack scope, we read our scalar out so have no use for it
+                    func.pop_frame(c);
+                }
+            }
+            // eval body
+            let scalar = compile_scalar(c, func, &body.value);
+
+            func.store_typed(&out, iter_index, scalar);
+
+            // pop scope
+            func.pop_frame(c);
+
+            let next_idx = func.increment(iter_index);
+
+            let should_break = func.add_unspanned(naga::Expression::Binary {
+                op: naga::BinaryOperator::GreaterEqual,
+                left: next_idx,
+                right: len,
+            });
+
+            // barrier
+            func.emit_exprs();
+
+            func.body.push(
+                Statement::If {
+                    condition: should_break,
+                    accept: Block::from_vec(vec![Statement::Break]),
+                    reject: Block::new(),
+                },
+                naga::Span::UNDEFINED,
+            );
+            // increment index
+            func.store(index, next_idx);
+
+            mem::swap(&mut prev_body, &mut func.body);
+            func.body.push(
+                Statement::Loop {
+                    body: prev_body,
+                    continuing: Block::new(),
+                    break_if: None,
+                },
+                naga::Span::UNDEFINED,
+            );
+            out
+        }
 
         type_checker::Expression::BuiltIn(built_in) => todo!(),
         _ => unreachable!(),
@@ -421,10 +549,11 @@ fn compile_scalar(
             naga::Expression::Literal(naga::Literal::F32(*v as f32))
         }
         type_checker::Expression::Identifier(i) => {
-            return ScalarRef::new(
-                expr.ty.base(),
-                func.load(*c.scalar_assignments.get(i).unwrap()),
-            );
+            if let Assignment::Scalar(s) = c.assignments.get(i).unwrap() {
+                return ScalarRef::new(expr.ty.base(), func.load(*s));
+            } else {
+                panic!()
+            }
         }
         type_checker::Expression::List(typed_expressions) => todo!(),
         type_checker::Expression::ListRange {
@@ -605,8 +734,12 @@ impl<T> WithScalarType<T> {
     }
 }
 
-pub type ScalarRef = WithScalarType<Handle<naga::Expression>>;
-pub type StackList = WithScalarType<StackAlloc>;
+pub(crate) type ScalarRef = WithScalarType<Handle<naga::Expression>>;
+pub(crate) type StackList = WithScalarType<StackAlloc>;
+enum Assignment {
+    Scalar(Handle<naga::Expression>),
+    List(StackAlloc),
+}
 
 trait ArenaExt<T> {
     fn add_unspanned(&mut self, val: T) -> Handle<T>;
