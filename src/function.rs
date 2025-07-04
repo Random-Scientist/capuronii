@@ -434,7 +434,7 @@ impl CompilingFunction {
         });
         // desmos is one-indexed :evilcat:
         self.add_unspanned(Expression::Binary {
-            op: naga::BinaryOperator::Add,
+            op: naga::BinaryOperator::Subtract,
             left: cast,
             right: self.one_u32,
         })
