@@ -1,13 +1,14 @@
 use std::{
     array,
+    mem::{swap, take},
     ops::{Deref, DerefMut},
 };
 
-use ambavia::type_checker::BaseType;
 use naga::{
     Block, Expression, Function, FunctionArgument, FunctionResult, Handle, LocalVariable, Span,
     Statement, Type,
 };
+use parse::type_checker::BaseType;
 
 use crate::{ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc};
 
@@ -156,6 +157,19 @@ impl CompilingFunction {
         self.arguments.push(arg);
         self.add_preemit(Expression::FunctionArgument(idx))
     }
+    fn flush_cache(&mut self) {
+        self.stack_head_cache = None;
+    }
+    /// Switches the target for linear compilation to a new block, returning the old one.
+    pub(crate) fn new_block(&mut self) -> Block {
+        // barrier to make sure all expressions that were inserted in the old block get emitted within it
+        self.emit_exprs();
+        take(&mut self.body)
+    }
+    pub(crate) fn swap_block(&mut self, other: &mut Block) {
+        self.emit_exprs();
+        swap(&mut self.func.body, other);
+    }
     fn new(
         mut func: Function,
         stack_head: Handle<Expression>,
@@ -250,7 +264,7 @@ impl CompilingFunction {
             Span::UNDEFINED,
         );
     }
-    /// loads a raw value (uint/u32) from a raw offset within a stack allocation
+    /// loads a raw value (u32) from a raw offset into a stack allocation
     pub(crate) fn load_from_stack(
         &mut self,
         alloc: &StackAlloc,
@@ -426,6 +440,7 @@ impl CompilingFunction {
             right: self.one_u32,
         })
     }
+    /// Converts a Number value into a valid zero-indexed dynamic list index
     pub(crate) fn make_index(&mut self, number: Handle<Expression>) -> Handle<Expression> {
         let cast = self.add_unspanned(Expression::As {
             expr: number,

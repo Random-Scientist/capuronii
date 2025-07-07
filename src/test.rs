@@ -1,11 +1,11 @@
-use ambavia::{
+use naga::valid::{ModuleInfo, Validator};
+use parse::{
     ast_parser::{parse_expression_list_entry, parse_nodes_into_expression},
     latex_parser,
     latex_tree_flattener::flatten,
     name_resolver::{ExpressionIndex, resolve_names},
     type_checker::type_check,
 };
-use naga::valid::{ModuleInfo, Validator};
 use typed_index_collections::ti_vec;
 
 use crate::compile;

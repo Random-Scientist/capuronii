@@ -3,12 +3,12 @@ use std::{
     mem::{self, discriminant},
 };
 
-use ambavia::type_checker::{self, BaseType, TypedExpression};
 use naga::{
     AddressSpace, Arena, Block, Function, FunctionArgument, FunctionResult, GlobalVariable, Handle,
     LocalVariable, MathFunction, Module, ResourceBinding, Statement, StorageAccess, StructMember,
     UniqueArena,
 };
+use parse::type_checker::{self, BaseType, TypedExpression};
 use typed_index_collections::{TiSlice, TiVec, ti_vec};
 
 use crate::{
@@ -266,11 +266,8 @@ fn materialize_list(
 
             let index = func.new_local(c.ty_ctx.u32, Some(func.zero_u32));
 
-            // barrier
-            func.emit_exprs();
-
             // compile into a fresh block for the loop body
-            let mut prev_body = mem::take(&mut func.body);
+            let mut prev_body = func.new_block();
 
             // new stack frame for scalar eval
             func.push_frame(c);
@@ -308,7 +305,7 @@ fn materialize_list(
             // increment index
             func.store(index, next_idx);
 
-            mem::swap(&mut prev_body, &mut func.body);
+            func.swap_block(&mut prev_body);
             func.body.push(
                 Statement::Loop {
                     body: prev_body,
@@ -328,7 +325,46 @@ fn materialize_list(
             test,
             consequent,
             alternate,
-        } => todo!(),
+        } => {
+            let test = compile_scalar(c, func, &test);
+
+            let len = func.new_local(c.ty_ctx.u32, None);
+            let base_addr = func.new_local(c.ty_ctx.u32, None);
+
+            let old_body = func.new_block();
+
+            let consequent_list = materialize_list(c, func, &consequent);
+            func.store(base_addr, consequent_list.inner.base_addr);
+            func.store(len, consequent_list.inner.len);
+
+            let consequent_body = func.new_block();
+
+            let alternate_list = materialize_list(c, func, &alternate);
+            func.store(base_addr, alternate_list.inner.base_addr);
+            func.store(len, alternate_list.inner.len);
+
+            let mut alternate_body = old_body;
+            func.swap_block(&mut alternate_body);
+            func.body.push(
+                Statement::If {
+                    condition: test.inner,
+                    accept: consequent_body,
+                    reject: alternate_body,
+                },
+                naga::Span::UNDEFINED,
+            );
+            let base_addr = func.load(base_addr);
+            let len = func.load(len);
+
+            StackList::new(
+                consequent.ty,
+                StackAlloc {
+                    stack_scope: todo!(),
+                    base_addr,
+                    len,
+                },
+            )
+        }
         type_checker::Expression::SumProd {
             kind,
             variable,
@@ -376,11 +412,8 @@ fn materialize_list(
 
             let index = func.new_local(c.ty_ctx.u32, Some(func.zero_u32));
 
-            // barrier
-            func.emit_exprs();
-
             // compile into a new block
-            let mut prev_body = mem::take(&mut func.body);
+            let mut prev_body = func.new_block();
 
             // new stack frame for comprehension body
             func.push_frame(c);
@@ -389,7 +422,7 @@ fn materialize_list(
             let mut prev_section_len = func.one_u32;
             let iter_index = func.load(index);
             for ((local, value), length) in lists.iter().zip(lengths) {
-                // integer division truncates towards zero, which is equivalent to `div_floor` for whole number values
+                // integer division truncates towards zero, which is equivalent to `div_floor` (the desired primitive here) for whole number values
                 let div = func.add_unspanned(naga::Expression::Binary {
                     op: naga::BinaryOperator::Divide,
                     left: iter_index,
@@ -455,8 +488,7 @@ fn materialize_list(
             );
             // increment index
             func.store(index, next_idx);
-
-            mem::swap(&mut prev_body, &mut func.body);
+            func.swap_block(&mut prev_body);
             func.body.push(
                 Statement::Loop {
                     body: prev_body,
