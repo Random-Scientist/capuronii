@@ -205,7 +205,7 @@ impl Join<'_> {
 
             cond_blocks.push((test, test_block, success_block));
 
-            curr_start_idx = blocks.in_body().add_preemit(naga::Expression::Binary {
+            curr_start_idx = blocks.in_body().add_unspanned(naga::Expression::Binary {
                 op: naga::BinaryOperator::Add,
                 left: curr_start_idx,
                 right: this_len,
@@ -330,9 +330,10 @@ impl Filter<'_> {
             },
             naga::Span::UNDEFINED,
         );
+        let len = func.load(out_len);
         MaterializedList::Temporary(StackAlloc {
             base_addr: out_base_addr,
-            len: out_len,
+            len,
         })
     }
 }

@@ -15,8 +15,8 @@ use crate::{
     alloc::{StackAlloc, StackState},
     function::CompilingFunction,
     listdef::{
-        Filter, Join, LazyBroadcast, LazyStaticList, ListDef, MaterializedList, StackList,
-        UntypedListDef,
+        Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
+        StackList, UntypedListDef,
     },
 };
 
@@ -190,7 +190,7 @@ pub fn compile(expr: &TypedExpression) -> Module {
     ctx.compile_expr(expr);
     ctx.module
 }
-pub fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> ListDef<'a> {
+pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> ListDef<'a> {
     let base = expr.ty.base();
     match &expr.e {
         type_checker::Expression::Identifier(_) => todo!(),
@@ -250,7 +250,16 @@ pub fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> ListDef<
             upper_bound,
             body,
         } => todo!(),
-        type_checker::Expression::For { body, lists } => todo!(),
+        type_checker::Expression::For { body, lists } => ListDef::new(
+            expr.ty.base(),
+            UntypedListDef::Comprehension(LazyComprehension {
+                varying: lists
+                    .iter()
+                    .map(|a| (a.id, collect_list(c, &a.value)))
+                    .collect(),
+                body,
+            }),
+        ),
         type_checker::Expression::BuiltIn { name, args } => match name {
             type_checker::BuiltIn::JoinNumber => {
                 let mut current_scalar_batch = 0..0;
