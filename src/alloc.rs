@@ -2,7 +2,7 @@ use naga::{BinaryOperator, Expression, Handle, Literal};
 
 use crate::{Compiler, function::CompilingFunction};
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StackAlloc {
+pub struct StackAlloc {
     /// base address of the allocation
     pub base_addr: Handle<Expression>,
     /// length of this allocation in [`u32`]s.
@@ -29,7 +29,7 @@ impl StackState {
 
 impl CompilingFunction {
     pub(crate) fn push_frame(&mut self, ctx: &mut Compiler) {
-        let f = self.new_local(ctx.ty_ctx.u32, self.zero_u32);
+        let f = self.new_local(ctx.types.u32, Some(self.zero_u32));
         ctx.stack.push_frame(f);
     }
 

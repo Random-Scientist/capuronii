@@ -1,9 +1,6 @@
-use naga::valid::{ModuleInfo, Validator};
+use naga::valid::Validator;
 use parse::{
-    ast_parser::{parse_expression_list_entry, parse_nodes_into_expression},
-    latex_parser,
-    latex_tree_flattener::flatten,
-    name_resolver::{ExpressionIndex, resolve_names},
+    ast_parser::parse_expression_list_entry, latex_parser, name_resolver::resolve_names,
     type_checker::type_check,
 };
 use typed_index_collections::ti_vec;
@@ -12,11 +9,13 @@ use crate::compile;
 
 #[test]
 fn test_to_mtl() {
-    let tex = r"c = [(a, b) \operatorname{for} a = [1,2,3,4] , b = [1,3,5]][2]";
+    //let tex = r"c = [ (a, \{ b > 2: [1,2,3,4], a > 2: [4,3,2,1], 1 \}[2] ) \operatorname{for} a = [1,2,3,4], b = [1,3,5] ][2]";
+    let tex = r"(c[ 3,2,1 ] \operatorname{with} c = [1,2,3])";
     let tex = latex_parser::parse_latex(tex).unwrap();
     let expr = parse_expression_list_entry(&tex).unwrap();
     let (a, b) = resolve_names(&ti_vec![expr]);
     let (checked, map) = type_check(&a);
+    dbg!(&checked);
     let expr = &checked.first().unwrap().value;
     let m = compile(expr);
     let mut v = Validator::new(Default::default(), Default::default());

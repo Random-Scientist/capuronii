@@ -8,9 +8,12 @@ use naga::{
     Block, Expression, Function, FunctionArgument, FunctionResult, Handle, LocalVariable, Span,
     Statement, Type,
 };
-use parse::type_checker::BaseType;
+use parse::type_checker::{self, BaseType};
 
-use crate::{ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc};
+use crate::{
+    ArenaExt, Compiler, ScalarRef, StackList, WithScalarType, alloc::StackAlloc, compile_list,
+    compile_scalar, listdef::MaterializedList,
+};
 
 const POINT_SIZE: u32 = 2;
 
@@ -18,6 +21,7 @@ const POINT_SIZE: u32 = 2;
 pub struct CompilingFunction {
     pub(crate) zero_u32: Handle<Expression>,
     pub(crate) one_u32: Handle<Expression>,
+    pub(crate) point_size_u32: Handle<Expression>,
     last_emit: usize,
     func: Function,
     // pointer to stack head
@@ -25,7 +29,7 @@ pub struct CompilingFunction {
     // cache the current stack head when it hasn't been modified to avoid redundant loads
     stack_head_cache: Option<Handle<Expression>>,
     // pointer to stack buffer (ptr<device, [u32]>)
-    pub(crate) stack_ptr: Handle<Expression>,
+    pub(crate) stack_array_ptr: Handle<Expression>,
 }
 impl Deref for CompilingFunction {
     type Target = Function;
@@ -41,23 +45,48 @@ impl DerefMut for CompilingFunction {
 }
 
 impl CompilingFunction {
+    fn new(
+        mut func: Function,
+        stack_head: Handle<Expression>,
+        stack_ptr: Handle<Expression>,
+    ) -> Self {
+        let zero_u32 = func
+            .expressions
+            .add_unspanned(Expression::Literal(naga::Literal::U32(0)));
+        let one_u32 = func
+            .expressions
+            .add_unspanned(Expression::Literal(naga::Literal::U32(1)));
+        let point_size_u32 = func
+            .expressions
+            .add_unspanned(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
+        Self {
+            last_emit: 0,
+            func,
+            stack_head,
+            stack_array_ptr: stack_ptr,
+            zero_u32,
+            one_u32,
+            stack_head_cache: None,
+            point_size_u32,
+        }
+    }
     pub(crate) fn new_primary(ctx: &mut Compiler) -> Self {
         let mut func = Function {
             name: Some("capuronii_main".into()),
             arguments: vec![
                 FunctionArgument {
                     name: "invocation_id".to_string().into(),
-                    ty: ctx.ty_ctx.uvec3,
+                    ty: ctx.types.uvec3,
                     binding: None,
                 },
                 FunctionArgument {
                     name: "num_workgroups".to_string().into(),
-                    ty: ctx.ty_ctx.uvec3,
+                    ty: ctx.types.uvec3,
                     binding: None,
                 },
             ],
             result: Some(FunctionResult {
-                ty: ctx.ty_ctx.f32,
+                ty: ctx.types.f32,
                 binding: None,
             }),
             ..Default::default()
@@ -78,8 +107,8 @@ impl CompilingFunction {
             func.expressions
                 .add_unspanned(naga::Expression::LocalVariable(v))
         };
-        let stack_base = gen_local("stack_base", ctx.ty_ctx.u32, None);
-        let stack_head = gen_local("stack_head", ctx.ty_ctx.u32, None);
+        let stack_base = gen_local("stack_base", ctx.types.u32, None);
+        let stack_head = gen_local("stack_head", ctx.types.u32, None);
 
         let stack_ptr = func
             .expressions
@@ -151,6 +180,7 @@ impl CompilingFunction {
         func.push_frame(ctx);
         func
     }
+
     /// inserts a function argument, returning a handle to its corresponding [`Expression::FunctionArgument`]
     fn add_arg(&mut self, arg: FunctionArgument) -> Handle<Expression> {
         let idx = self.arguments.len().try_into().unwrap();
@@ -169,55 +199,6 @@ impl CompilingFunction {
     pub(crate) fn swap_block(&mut self, other: &mut Block) {
         self.emit_exprs();
         swap(&mut self.func.body, other);
-    }
-    fn new(
-        mut func: Function,
-        stack_head: Handle<Expression>,
-        stack_ptr: Handle<Expression>,
-    ) -> Self {
-        let zero_u32 = func
-            .expressions
-            .add_unspanned(Expression::Literal(naga::Literal::U32(0)));
-        let one_u32 = func
-            .expressions
-            .add_unspanned(Expression::Literal(naga::Literal::U32(1)));
-        Self {
-            last_emit: 0,
-            func,
-            stack_head,
-            stack_ptr,
-            zero_u32,
-            one_u32,
-            stack_head_cache: None,
-        }
-    }
-    pub(crate) fn load_stack_head(&mut self) -> Handle<Expression> {
-        match self.stack_head_cache {
-            Some(v) => v,
-            None => {
-                let v = self.load(self.stack_head);
-                self.stack_head_cache = Some(v);
-                v
-            }
-        }
-    }
-    pub(crate) fn store_stack_head(&mut self, new_value: Handle<Expression>) {
-        self.stack_head_cache = None;
-        self.store(self.stack_head, new_value);
-    }
-    pub(crate) fn bitcast_to_u32(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
-        self.add_unspanned(Expression::As {
-            expr,
-            kind: naga::ScalarKind::Uint,
-            convert: None,
-        })
-    }
-    pub(crate) fn bitcast_to_float(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
-        self.add_unspanned(Expression::As {
-            expr,
-            kind: naga::ScalarKind::Float,
-            convert: None,
-        })
     }
     pub(crate) fn add_unspanned(&mut self, expr: naga::Expression) -> Handle<naga::Expression> {
         self.func.expressions.add_unspanned(expr)
@@ -238,193 +219,46 @@ impl CompilingFunction {
         self.body
             .push(Statement::Store { pointer, value }, Span::UNDEFINED);
     }
-    /// stores a raw value (uint/u32) to a raw offset within a stack allocation
-    pub(crate) fn store_to_stack(
-        &mut self,
-        alloc: &StackAlloc,
-        index: Handle<Expression>,
-        value: Handle<Expression>,
-    ) {
-        let offset = self.add_unspanned(Expression::Binary {
-            op: naga::BinaryOperator::Add,
-            left: alloc.base_addr,
-            right: index,
-        });
 
-        let item_ptr = self.add_unspanned(Expression::Access {
-            base: self.stack_ptr,
-            index: offset,
-        });
-        self.emit_exprs();
-        self.body.push(
-            Statement::Store {
-                pointer: item_ptr,
-                value,
-            },
-            Span::UNDEFINED,
-        );
+    pub(crate) fn bitcast_to_u32(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
+        self.add_unspanned(Expression::As {
+            expr,
+            kind: naga::ScalarKind::Uint,
+            convert: None,
+        })
     }
-    /// loads a raw value (u32) from a raw offset into a stack allocation
-    pub(crate) fn load_from_stack(
-        &mut self,
-        alloc: &StackAlloc,
-        index: Handle<Expression>,
-    ) -> Handle<Expression> {
-        let offset = self.add_unspanned(Expression::Binary {
-            op: naga::BinaryOperator::Add,
-            left: alloc.base_addr,
-            right: index,
-        });
-
-        let item_ptr = self.add_unspanned(Expression::Access {
-            base: self.stack_ptr,
-            index: offset,
-        });
-        self.add_unspanned(Expression::Load { pointer: item_ptr })
+    pub(crate) fn bitcast_to_float(&mut self, expr: Handle<Expression>) -> Handle<Expression> {
+        self.add_unspanned(Expression::As {
+            expr,
+            kind: naga::ScalarKind::Float,
+            convert: None,
+        })
     }
 
+    pub(crate) fn load_stack_head(&mut self) -> Handle<Expression> {
+        match self.stack_head_cache {
+            Some(v) => v,
+            None => {
+                let v = self.load(self.stack_head);
+                self.stack_head_cache = Some(v);
+                v
+            }
+        }
+    }
+    pub(crate) fn store_stack_head(&mut self, new_value: Handle<Expression>) {
+        self.stack_head_cache = None;
+        self.store(self.stack_head, new_value);
+    }
     pub(crate) fn skip_emit_exprs(&mut self) {
         self.last_emit = self.func.expressions.len();
     }
     pub(crate) fn emit_exprs(&mut self) {
+        if self.last_emit == self.func.expressions.len() {
+            return;
+        }
         let range = self.func.expressions.range_from(self.last_emit);
         self.body.push(Statement::Emit(range), Span::UNDEFINED);
         self.last_emit = self.func.expressions.len();
-    }
-    pub(crate) fn new_scalar_assignment(
-        &mut self,
-        ctx: &mut Compiler,
-        id: usize,
-        scalar: BaseType,
-    ) -> Handle<naga::Expression> {
-        let x = self.new_local(ctx.scalar_type(scalar), None);
-        ctx.assignments.insert(id, crate::Assignment::Scalar(x));
-        x
-    }
-    pub(crate) fn new_list_assignment(&mut self, ctx: &mut Compiler, id: usize, a: &StackAlloc) {
-        ctx.assignments.insert(id, crate::Assignment::List(*a));
-    }
-
-    pub(crate) fn new_local(
-        &mut self,
-        ty: Handle<Type>,
-        init: Option<Handle<Expression>>,
-    ) -> Handle<Expression> {
-        let local_handle = self.local_variables.add_unspanned(LocalVariable {
-            name: None,
-            ty,
-            init,
-        });
-        self.add_preemit(Expression::LocalVariable(local_handle))
-    }
-    pub(crate) fn done(mut self, ctx: &mut Compiler, ret: ScalarRef) -> Function {
-        self.pop_frame(ctx);
-        self.result = Some(FunctionResult {
-            ty: ctx.scalar_type(ret.ty),
-            binding: None,
-        });
-        self.body.push(
-            naga::Statement::Return {
-                value: Some(ret.inner),
-            },
-            naga::Span::UNDEFINED,
-        );
-        self.func
-    }
-    pub(crate) fn compute_list_len(&mut self, r: &StackList) -> Handle<Expression> {
-        let mut h = r.inner.len;
-        if r.ty == BaseType::Point {
-            let two = self.add_preemit(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
-            h = self.add_unspanned(Expression::Binary {
-                op: naga::BinaryOperator::Divide,
-                left: h,
-                right: two,
-            })
-        }
-        h
-    }
-    pub(crate) fn alloc_list(
-        &mut self,
-        ctx: &mut Compiler,
-        ty: BaseType,
-        mut len: Handle<Expression>,
-    ) -> StackList {
-        if ty == BaseType::Point {
-            let two = self.add_preemit(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
-            len = self.add_unspanned(Expression::Binary {
-                op: naga::BinaryOperator::Multiply,
-                left: len,
-                right: two,
-            })
-        }
-        StackList::new(ty, self.alloc(ctx, len))
-    }
-    pub(crate) fn store_typed(
-        &mut self,
-        list: &StackList,
-        mut index: Handle<Expression>,
-        value: ScalarRef,
-    ) {
-        debug_assert!(list.types_eq(&value));
-        match value.ty {
-            BaseType::Number => {
-                let h = self.bitcast_to_u32(value.inner);
-                self.store_to_stack(&list.inner, index, h);
-            }
-            BaseType::Point => {
-                let two = self.add_preemit(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
-                index = self.add_unspanned(Expression::Binary {
-                    op: naga::BinaryOperator::Multiply,
-                    left: index,
-                    right: two,
-                });
-                let a = array::from_fn::<_, { POINT_SIZE as usize }, _>(|i| i as u32)
-                    .map(|i| self.access_fixed(value.inner, i));
-
-                for h in a {
-                    let h = self.bitcast_to_u32(h);
-                    self.store_to_stack(&list.inner, index, h);
-                    index = self.increment(index);
-                }
-            }
-            BaseType::Bool | BaseType::Empty => todo!(),
-        }
-    }
-    pub(crate) fn load_typed(
-        &mut self,
-        ctx: &Compiler,
-        list: &StackList,
-        mut index: Handle<Expression>,
-    ) -> ScalarRef {
-        ScalarRef::new(
-            list.ty,
-            match list.ty {
-                BaseType::Number => {
-                    let v = self.load_from_stack(&list.inner, index);
-                    self.bitcast_to_float(v)
-                }
-                BaseType::Point => {
-                    let size =
-                        self.add_preemit(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
-                    index = self.add_unspanned(Expression::Binary {
-                        op: naga::BinaryOperator::Multiply,
-                        left: index,
-                        right: size,
-                    });
-                    let mut components = Vec::with_capacity(POINT_SIZE as usize);
-                    for _ in 0..POINT_SIZE {
-                        let val = self.load_from_stack(&list.inner, index);
-                        components.push(self.bitcast_to_float(val));
-                        index = self.increment(index);
-                    }
-                    self.add_unspanned(Expression::Compose {
-                        ty: ctx.ty_ctx.point,
-                        components,
-                    })
-                }
-                BaseType::Bool | BaseType::Empty => todo!(),
-            },
-        )
     }
     pub(crate) fn access_fixed(
         &mut self,
@@ -440,6 +274,245 @@ impl CompilingFunction {
             right: self.one_u32,
         })
     }
+    pub(crate) fn size_of_scalar(&self, ty: BaseType) -> Handle<Expression> {
+        match ty {
+            BaseType::Number => self.one_u32,
+            BaseType::Point => self.point_size_u32,
+            BaseType::Bool => todo!(),
+            BaseType::Empty => todo!(),
+        }
+    }
+    pub(crate) fn new_local(
+        &mut self,
+        ty: Handle<Type>,
+        init: Option<Handle<Expression>>,
+    ) -> Handle<Expression> {
+        let local_handle = self.local_variables.add_unspanned(LocalVariable {
+            name: None,
+            ty,
+            init,
+        });
+        self.add_preemit(Expression::LocalVariable(local_handle))
+    }
+    pub(crate) fn get_scalar_assignment(
+        &mut self,
+        ctx: &mut Compiler,
+        id: usize,
+        scalar: BaseType,
+    ) -> Handle<naga::Expression> {
+        let s = ctx.scalar_type(scalar);
+        if let crate::Assignment::Scalar(s) = ctx
+            .assignments
+            .entry(id)
+            .or_insert_with(|| crate::Assignment::Scalar(self.new_local(s, None)))
+        {
+            *s
+        } else {
+            panic!()
+        }
+    }
+    pub(crate) fn bind_assignments(
+        &mut self,
+        ctx: &mut Compiler,
+        assignments: &[type_checker::Assignment],
+    ) {
+        for assignment in assignments {
+            if assignment.value.ty.is_list() {
+                let def = compile_list(ctx, self, &assignment.value);
+                let mat = def.materialize(ctx, self);
+                ctx.bind_list_assignment(assignment.id, mat);
+            } else {
+                let scalar =
+                    self.get_scalar_assignment(ctx, assignment.id, assignment.value.ty.base());
+
+                self.push_frame(ctx);
+                let value = compile_scalar(ctx, self, &assignment.value);
+                self.pop_frame(ctx);
+
+                self.store(scalar, value.inner);
+            }
+        }
+    }
+    pub(crate) fn done(mut self, ctx: &mut Compiler, ret: ScalarRef) -> Function {
+        self.pop_frame(ctx);
+        self.result = Some(FunctionResult {
+            ty: ctx.scalar_type(ret.ty),
+            binding: None,
+        });
+        self.body.push(
+            naga::Statement::Return {
+                value: Some(ret.inner),
+            },
+            naga::Span::UNDEFINED,
+        );
+        self.func
+    }
+    pub(crate) fn load_stack(&mut self, addr: Handle<Expression>) -> Handle<Expression> {
+        let item_ptr = self.add_unspanned(Expression::Access {
+            base: self.stack_array_ptr,
+            index: addr,
+        });
+        self.load(item_ptr)
+    }
+    pub(crate) fn store_stack(&mut self, addr: Handle<Expression>, value: Handle<Expression>) {
+        let item_ptr = self.add_unspanned(Expression::Access {
+            base: self.stack_array_ptr,
+            index: addr,
+        });
+        self.store(item_ptr, value);
+    }
+    /// store a single raw value to the top of the stack and increment
+    pub(crate) fn store_to_top_of_stack(&mut self, value: Handle<Expression>) {
+        let offset = self.load_stack_head();
+
+        self.store_stack(offset, value);
+        let inced = self.increment(offset);
+        self.store_stack_head(inced);
+    }
+    pub(crate) fn store_to_top_of_stack_typed(&mut self, value: ScalarRef) {
+        let offset = self.load_stack_head();
+        self.store_stack_typed(offset, value);
+        let s = self.size_of_scalar(value.ty);
+        let new_head = self.add_preemit(Expression::Binary {
+            op: naga::BinaryOperator::Add,
+            left: offset,
+            right: s,
+        });
+        self.store_stack_head(new_head);
+    }
+    /// Converts an allocation and a raw index into a stack address
+    pub(crate) fn index_alloc_to_addr(
+        &mut self,
+        alloc: &StackAlloc,
+        idx: Handle<Expression>,
+    ) -> Handle<Expression> {
+        self.add_unspanned(Expression::Binary {
+            op: naga::BinaryOperator::Add,
+            left: alloc.base_addr,
+            right: idx,
+        })
+    }
+    /// computes an index's corresponding raw index (because points occupy multiple stack slots each)
+    pub(crate) fn index_to_raw(
+        &mut self,
+        idx: Handle<Expression>,
+        ty: BaseType,
+    ) -> Handle<Expression> {
+        self.add_unspanned(Expression::Binary {
+            op: naga::BinaryOperator::Multiply,
+            left: idx,
+            right: self.size_of_scalar(ty),
+        })
+    }
+    /// inverse of [`Self::index_to_raw`]
+    pub(crate) fn raw_to_index(
+        &mut self,
+        raw: Handle<Expression>,
+        ty: BaseType,
+    ) -> Handle<Expression> {
+        self.add_unspanned(Expression::Binary {
+            op: naga::BinaryOperator::Divide,
+            left: raw,
+            right: self.size_of_scalar(ty),
+        })
+    }
+
+    pub(crate) fn compute_stack_list_len(&mut self, r: &StackList) -> Handle<Expression> {
+        let mut h = r.inner.len;
+        if r.ty == BaseType::Point {
+            h = self.add_unspanned(Expression::Binary {
+                op: naga::BinaryOperator::Divide,
+                left: h,
+                right: self.point_size_u32,
+            })
+        }
+        h
+    }
+    pub(crate) fn alloc_list(
+        &mut self,
+        ctx: &mut Compiler,
+        ty: BaseType,
+        mut len: Handle<Expression>,
+    ) -> StackList {
+        if ty == BaseType::Point {
+            len = self.add_unspanned(Expression::Binary {
+                op: naga::BinaryOperator::Multiply,
+                left: len,
+                right: self.point_size_u32,
+            })
+        }
+        StackList::new(ty, self.alloc(ctx, len))
+    }
+    pub(crate) fn store_stack_typed(&mut self, mut addr: Handle<Expression>, value: ScalarRef) {
+        match value.ty {
+            BaseType::Number => {
+                let h = self.bitcast_to_u32(value.inner);
+                self.store_stack(addr, h);
+            }
+            BaseType::Point => {
+                let a = array::from_fn::<_, { POINT_SIZE as usize }, _>(|i| i as u32)
+                    .map(|i| self.access_fixed(value.inner, i));
+                for h in a {
+                    let h = self.bitcast_to_u32(h);
+
+                    self.store_stack(addr, h);
+                    addr = self.increment(addr);
+                }
+            }
+            BaseType::Bool | BaseType::Empty => todo!(),
+        }
+    }
+    pub(crate) fn store_index_list_typed(
+        &mut self,
+        list: &StackList,
+        index: Handle<Expression>,
+        value: ScalarRef,
+    ) {
+        debug_assert!(list.types_eq(&value));
+
+        let raw = self.index_to_raw(index, list.ty);
+        let addr = self.index_alloc_to_addr(&list.inner, raw);
+        self.store_stack_typed(addr, value);
+    }
+    pub(crate) fn load_stack_typed(
+        &mut self,
+        ctx: &Compiler,
+        mut addr: Handle<Expression>,
+        ty: BaseType,
+    ) -> ScalarRef {
+        ScalarRef::new(
+            ty,
+            match ty {
+                BaseType::Number => self.load_stack(addr),
+                BaseType::Point => {
+                    let mut components = Vec::with_capacity(POINT_SIZE as usize);
+                    for _ in 0..POINT_SIZE {
+                        let val = self.load_stack(addr);
+
+                        components.push(self.bitcast_to_float(val));
+
+                        addr = self.increment(addr);
+                    }
+                    self.add_unspanned(Expression::Compose {
+                        ty: ctx.types.point,
+                        components,
+                    })
+                }
+                BaseType::Bool | BaseType::Empty => todo!(),
+            },
+        )
+    }
+    pub(crate) fn load_typed_from_list(
+        &mut self,
+        ctx: &Compiler,
+        list: &StackList,
+        index: Handle<Expression>,
+    ) -> ScalarRef {
+        let raw = self.index_to_raw(index, list.ty);
+        let addr = self.index_alloc_to_addr(&list.inner, raw);
+        self.load_stack_typed(ctx, addr, list.ty)
+    }
+
     /// Converts a Number value into a valid zero-indexed dynamic list index
     pub(crate) fn make_index(&mut self, number: Handle<Expression>) -> Handle<Expression> {
         let cast = self.add_unspanned(Expression::As {

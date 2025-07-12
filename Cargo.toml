@@ -7,3 +7,4 @@ edition = "2024"
 parse = { git = "https://github.com/Random-Scientist/ambavia", rev = "cd2da740458a32b17266f934f76c25a3272a085a" }
 naga = { version = "25.0.1", features = ["msl-out", "hlsl-out"] }
 typed-index-collections = "3.3.0"
+replace_with = "0.1.8"
