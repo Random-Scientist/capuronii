@@ -2,6 +2,7 @@ use std::{
     array,
     mem::{swap, take},
     ops::{Deref, DerefMut},
+    panic::Location,
 };
 
 use naga::{
@@ -11,7 +12,7 @@ use naga::{
 use parse::type_checker::{self, BaseType};
 
 use crate::{
-    ArenaExt, Compiler, ScalarRef, StackList, WithScalarType, alloc::StackAlloc, compile_list,
+    ArenaExt, Compiler, ScalarRef, StackList, WithScalarType, alloc::StackAlloc, collect_list,
     compile_scalar, listdef::MaterializedList,
 };
 
@@ -200,9 +201,17 @@ impl CompilingFunction {
         self.emit_exprs();
         swap(&mut self.func.body, other);
     }
+    #[track_caller]
     pub(crate) fn add_unspanned(&mut self, expr: naga::Expression) -> Handle<naga::Expression> {
-        self.func.expressions.add_unspanned(expr)
+        let ret = self.func.expressions.add_unspanned(expr);
+        println!(
+            "added expression {:#?}, location: {}",
+            ret,
+            Location::caller()
+        );
+        ret
     }
+    #[track_caller]
     pub(crate) fn add_preemit(&mut self, expr: Expression) -> Handle<Expression> {
         self.emit_exprs();
         let r = self.add_unspanned(expr);
@@ -214,6 +223,7 @@ impl CompilingFunction {
             .expressions
             .add_unspanned(Expression::Load { pointer })
     }
+    #[track_caller]
     pub(crate) fn store(&mut self, pointer: Handle<Expression>, value: Handle<Expression>) {
         self.emit_exprs();
         self.body
@@ -252,11 +262,17 @@ impl CompilingFunction {
     pub(crate) fn skip_emit_exprs(&mut self) {
         self.last_emit = self.func.expressions.len();
     }
+    #[track_caller]
     pub(crate) fn emit_exprs(&mut self) {
         if self.last_emit == self.func.expressions.len() {
             return;
         }
         let range = self.func.expressions.range_from(self.last_emit);
+        println!(
+            "emit({:#?}) called, location: {}",
+            range.clone(),
+            Location::caller()
+        );
         self.body.push(Statement::Emit(range), Span::UNDEFINED);
         self.last_emit = self.func.expressions.len();
     }
@@ -280,8 +296,10 @@ impl CompilingFunction {
             BaseType::Point => self.point_size_u32,
             BaseType::Bool => todo!(),
             BaseType::Empty => todo!(),
+            BaseType::Polygon => todo!(),
         }
     }
+    #[track_caller]
     pub(crate) fn new_local(
         &mut self,
         ty: Handle<Type>,
@@ -292,6 +310,11 @@ impl CompilingFunction {
             ty,
             init,
         });
+        println!(
+            "created local {:#?} at {}",
+            local_handle,
+            Location::caller()
+        );
         self.add_preemit(Expression::LocalVariable(local_handle))
     }
     pub(crate) fn get_scalar_assignment(
@@ -300,6 +323,7 @@ impl CompilingFunction {
         id: usize,
         scalar: BaseType,
     ) -> Handle<naga::Expression> {
+        println!("assignment: {id}, ty: {scalar:#?}");
         let s = ctx.scalar_type(scalar);
         if let crate::Assignment::Scalar(s) = ctx
             .assignments
@@ -318,7 +342,7 @@ impl CompilingFunction {
     ) {
         for assignment in assignments {
             if assignment.value.ty.is_list() {
-                let def = compile_list(ctx, self, &assignment.value);
+                let def = collect_list(ctx, &assignment.value);
                 let mat = def.materialize(ctx, self);
                 ctx.bind_list_assignment(assignment.id, mat);
             } else {
@@ -361,19 +385,11 @@ impl CompilingFunction {
         });
         self.store(item_ptr, value);
     }
-    /// store a single raw value to the top of the stack and increment
-    pub(crate) fn store_to_top_of_stack(&mut self, value: Handle<Expression>) {
-        let offset = self.load_stack_head();
-
-        self.store_stack(offset, value);
-        let inced = self.increment(offset);
-        self.store_stack_head(inced);
-    }
     pub(crate) fn store_to_top_of_stack_typed(&mut self, value: ScalarRef) {
         let offset = self.load_stack_head();
         self.store_stack_typed(offset, value);
         let s = self.size_of_scalar(value.ty);
-        let new_head = self.add_preemit(Expression::Binary {
+        let new_head = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
             left: offset,
             right: s,
@@ -459,7 +475,7 @@ impl CompilingFunction {
                     addr = self.increment(addr);
                 }
             }
-            BaseType::Bool | BaseType::Empty => todo!(),
+            BaseType::Bool | BaseType::Empty | BaseType::Polygon => todo!(),
         }
     }
     pub(crate) fn store_index_list_typed(
@@ -483,7 +499,10 @@ impl CompilingFunction {
         ScalarRef::new(
             ty,
             match ty {
-                BaseType::Number => self.load_stack(addr),
+                BaseType::Number => {
+                    let load = self.load_stack(addr);
+                    self.bitcast_to_float(load)
+                }
                 BaseType::Point => {
                     let mut components = Vec::with_capacity(POINT_SIZE as usize);
                     for _ in 0..POINT_SIZE {
@@ -498,7 +517,7 @@ impl CompilingFunction {
                         components,
                     })
                 }
-                BaseType::Bool | BaseType::Empty => todo!(),
+                BaseType::Bool | BaseType::Empty | BaseType::Polygon => todo!(),
             },
         )
     }

@@ -250,7 +250,7 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 [[package]]
 name = "parse"
 version = "0.1.0"
-source = "git+https://github.com/Random-Scientist/ambavia?rev=cd2da740458a32b17266f934f76c25a3272a085a#cd2da740458a32b17266f934f76c25a3272a085a"
+source = "git+https://github.com/fadaaszhi/ambavia?rev=d12430221796499bfd34ac006985497a94e56b31#d12430221796499bfd34ac006985497a94e56b31"
 dependencies = [
  "derive_more",
  "logos",

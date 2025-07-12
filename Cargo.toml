@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-parse = { git = "https://github.com/Random-Scientist/ambavia", rev = "cd2da740458a32b17266f934f76c25a3272a085a" }
+parse = { git = "https://github.com/fadaaszhi/ambavia", rev = "d12430221796499bfd34ac006985497a94e56b31" }
 naga = { version = "25.0.1", features = ["msl-out", "hlsl-out"] }
 typed-index-collections = "3.3.0"
 replace_with = "0.1.8"

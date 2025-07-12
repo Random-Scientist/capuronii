@@ -14,7 +14,10 @@ use typed_index_collections::{TiSlice, TiVec, ti_vec};
 use crate::{
     alloc::{StackAlloc, StackState},
     function::CompilingFunction,
-    listdef::{Filter, LazyBroadcast, ListDef, MaterializedList, StackList, UntypedListDef},
+    listdef::{
+        Filter, Join, LazyBroadcast, LazyStaticList, ListDef, MaterializedList, StackList,
+        UntypedListDef,
+    },
 };
 
 mod alloc;
@@ -174,6 +177,7 @@ impl Compiler {
             BaseType::Point => self.types.point,
             BaseType::Bool => self.types.bool,
             BaseType::Empty => panic!("invalid scalar type Empty"),
+            BaseType::Polygon => todo!(),
         }
     }
     fn bind_list_assignment(&mut self, id: usize, list: MaterializedList) {
@@ -186,11 +190,7 @@ pub fn compile(expr: &TypedExpression) -> Module {
     ctx.compile_expr(expr);
     ctx.module
 }
-pub fn compile_list<'a>(
-    c: &mut Compiler,
-    func: &mut CompilingFunction,
-    expr: &'a TypedExpression,
-) -> ListDef<'a> {
+pub fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> ListDef<'a> {
     let base = expr.ty.base();
     match &expr.e {
         type_checker::Expression::Identifier(_) => todo!(),
@@ -211,7 +211,7 @@ pub fn compile_list<'a>(
             listdef::UntypedListDef::Broadcast(LazyBroadcast {
                 varying: vectors
                     .iter()
-                    .map(|l| (l.id, compile_list(c, func, &l.value)))
+                    .map(|l| (l.id, collect_list(c, &l.value)))
                     .collect(),
                 body,
                 scalars,
@@ -222,7 +222,7 @@ pub fn compile_list<'a>(
             left,
             right,
         } => {
-            let right = compile_list(c, func, &right);
+            let right = collect_list(c, &right);
             let UntypedListDef::Broadcast(filter) = right.inner else {
                 panic!()
             };
@@ -231,7 +231,7 @@ pub fn compile_list<'a>(
                 | type_checker::BinaryOperator::FilterPointList => ListDef::new(
                     base,
                     listdef::UntypedListDef::Filter(Filter {
-                        src: Box::new(compile_list(c, func, &left)),
+                        src: Box::new(collect_list(c, &left)),
                         filter,
                     }),
                 ),
@@ -251,317 +251,44 @@ pub fn compile_list<'a>(
             body,
         } => todo!(),
         type_checker::Expression::For { body, lists } => todo!(),
-        type_checker::Expression::BuiltIn(built_in) => todo!(),
-        _ => unreachable!(),
-    }
-}
-fn materialize_list(
-    c: &mut Compiler,
-    func: &mut CompilingFunction,
-    expr: &TypedExpression,
-) -> StackList {
-    match &expr.e {
-        type_checker::Expression::Identifier(i) => {
-            todo!()
-        }
-        type_checker::Expression::List(typed_expressions) => {
-            let len = func.add_preemit(naga::Expression::Literal(naga::Literal::U32(
-                typed_expressions.len() as u32,
-            )));
-            let list = func.alloc_list(c, expr.ty.base(), len);
-
-            for (idx, s) in typed_expressions.iter().enumerate() {
-                let value = compile_scalar(c, func, s);
-                let index =
-                    func.add_preemit(naga::Expression::Literal(naga::Literal::U32(idx as u32)));
-                func.store_index_list_typed(&list, index, value);
-            }
-            list
-        }
-        type_checker::Expression::BinaryOperation {
-            operation:
-                type_checker::BinaryOperator::FilterNumberList
-                | type_checker::BinaryOperator::FilterPointList,
-            left,
-            right,
-        } => {
-            // let to_filter = materialize_list(c, func, &left);
-            // let type_checker::Expression::Broadcast {
-            //     scalars,
-            //     vectors,
-            //     body,
-            // } = right
-            // else {
-            //     panic!();
-            // };
-            // let type_checker::Expression::ChainedComparison {
-            //     operands,
-            //     operators,
-            // } = body
-            // else {
-            //     panic!();
-            // };
-
-            todo!()
-        }
-        type_checker::Expression::ListRange {
-            before_ellipsis,
-            after_ellipsis,
-        } => todo!(),
-        type_checker::Expression::Broadcast {
-            scalars,
-            vectors,
-            body,
-        } => {
-            for scalar in scalars {
-                let value = compile_scalar(c, func, &scalar.value).inner;
-                let local = func.get_scalar_assignment(c, scalar.id, scalar.value.ty.base());
-                func.store(local, value);
-            }
-            let lists = vectors
-                .iter()
-                .map(|a| {
-                    let l = materialize_list(c, func, &a.value);
-
-                    (func.get_scalar_assignment(c, a.id, l.ty), l)
-                })
-                .collect::<Vec<_>>();
-
-            let mut len = None;
-
-            for (id, l) in lists.iter() {
-                let this_len = func.compute_stack_list_len(l);
-                if let Some(l) = len {
-                    len = Some(func.add_unspanned(naga::Expression::Math {
-                        fun: MathFunction::Min,
-                        arg: l,
-                        arg1: Some(this_len),
-                        arg2: None,
-                        arg3: None,
-                    }));
-                } else {
-                    len = Some(this_len);
+        type_checker::Expression::BuiltIn { name, args } => match name {
+            type_checker::BuiltIn::JoinNumber => {
+                let mut current_scalar_batch = 0..0;
+                let mut listdefs = Vec::new();
+                for (idx, val) in args.iter().enumerate() {
+                    if val.ty.is_list() {
+                        if !current_scalar_batch.is_empty() {
+                            listdefs.push(ListDef::new(
+                                val.ty.base(),
+                                UntypedListDef::LazyStatic(LazyStaticList {
+                                    elements: &args[current_scalar_batch.clone()],
+                                }),
+                            ));
+                        }
+                        current_scalar_batch.start = idx + 1;
+                        current_scalar_batch.end = idx + 1;
+                        listdefs.push(collect_list(c, val));
+                    } else {
+                        current_scalar_batch.end += 1;
+                    }
                 }
-            }
-            // allocate output list
-            let len = len.unwrap();
-            let out = func.alloc_list(c, expr.ty.base(), len);
-
-            let index = func.new_local(c.types.u32, Some(func.zero_u32));
-
-            // compile into a fresh block for the loop body
-            let mut prev_body = func.new_block();
-
-            // new stack frame for scalar eval
-            func.push_frame(c);
-            // loop body prologue
-            // load iter index
-            let iter_idx = func.load(index);
-
-            for (assignment_pointer, list) in lists.iter() {
-                // assign varyings
-                let access = func.load_typed_from_list(c, list, iter_idx);
-                func.store(*assignment_pointer, access.inner);
-            }
-            let res = compile_scalar(c, func, body);
-            func.store_index_list_typed(&out, iter_idx, res);
-            // end stack frame, we already stored out the result we care about
-            func.pop_frame(c);
-
-            let next_idx = func.increment(iter_idx);
-            let should_break = func.add_unspanned(naga::Expression::Binary {
-                op: naga::BinaryOperator::GreaterEqual,
-                left: next_idx,
-                right: len,
-            });
-            // barrier
-            func.emit_exprs();
-
-            func.body.push(
-                Statement::If {
-                    condition: should_break,
-                    accept: Block::from_vec(vec![Statement::Break]),
-                    reject: Block::new(),
-                },
-                naga::Span::UNDEFINED,
-            );
-            // increment index
-            func.store(index, next_idx);
-
-            func.swap_block(&mut prev_body);
-            func.body.push(
-                Statement::Loop {
-                    body: prev_body,
-                    continuing: Block::new(),
-                    break_if: None,
-                },
-                naga::Span::UNDEFINED,
-            );
-            out
-        }
-
-        type_checker::Expression::ChainedComparison {
-            operands,
-            operators,
-        } => todo!(),
-        type_checker::Expression::Piecewise {
-            test,
-            consequent,
-            alternate,
-        } => {
-            let test = compile_scalar(c, func, &test);
-
-            let len = func.new_local(c.types.u32, None);
-            let base_addr = func.new_local(c.types.u32, None);
-
-            let old_body = func.new_block();
-
-            let consequent_list = materialize_list(c, func, &consequent);
-            func.store(base_addr, consequent_list.inner.base_addr);
-            func.store(len, consequent_list.inner.len);
-
-            let consequent_body = func.new_block();
-
-            let alternate_list = materialize_list(c, func, &alternate);
-            func.store(base_addr, alternate_list.inner.base_addr);
-            func.store(len, alternate_list.inner.len);
-
-            let mut alternate_body = old_body;
-            func.swap_block(&mut alternate_body);
-            func.body.push(
-                Statement::If {
-                    condition: test.inner,
-                    accept: consequent_body,
-                    reject: alternate_body,
-                },
-                naga::Span::UNDEFINED,
-            );
-            let base_addr = func.load(base_addr);
-            let len = func.load(len);
-
-            StackList::new(consequent.ty.base(), StackAlloc { base_addr, len })
-        }
-        type_checker::Expression::SumProd {
-            kind,
-            variable,
-            lower_bound,
-            upper_bound,
-            body,
-        } => todo!(),
-        type_checker::Expression::BinaryOperation {
-            operation:
-                type_checker::BinaryOperator::FilterNumberList
-                | type_checker::BinaryOperator::FilterPointList,
-            left,
-            right,
-        } => {
-            todo!()
-        }
-        type_checker::Expression::For { body, lists } => {
-            let lists = lists
-                .iter()
-                .map(|a| {
-                    let l = materialize_list(c, func, &a.value);
-
-                    (func.get_scalar_assignment(c, a.id, l.ty), l)
-                })
-                .collect::<Vec<_>>();
-            let mut out_len = None;
-            let mut lengths = Vec::new();
-
-            for (id, l) in lists.iter() {
-                let this_len = func.compute_stack_list_len(l);
-                lengths.push(this_len);
-                if let Some(l) = out_len {
-                    out_len = Some(func.add_unspanned(naga::Expression::Binary {
-                        op: naga::BinaryOperator::Multiply,
-                        left: l,
-                        right: this_len,
-                    }));
-                } else {
-                    out_len = Some(this_len);
+                if !current_scalar_batch.is_empty() {
+                    listdefs.push(ListDef::new(
+                        expr.ty.base(),
+                        UntypedListDef::LazyStatic(LazyStaticList {
+                            elements: &args[current_scalar_batch],
+                        }),
+                    ));
                 }
+                ListDef::new(
+                    expr.ty.base(),
+                    UntypedListDef::Join(Join { lists: listdefs }),
+                )
             }
-            // allocate output list
-            let len = out_len.unwrap();
-            let out = func.alloc_list(c, expr.ty.base(), len);
-
-            let index = func.new_local(c.types.u32, Some(func.zero_u32));
-
-            // compile into a new block
-            let mut prev_body = func.new_block();
-
-            // new stack frame for comprehension body
-            func.push_frame(c);
-
-            // bind varyings
-            let mut prev_section_len = func.one_u32;
-            let iter_index = func.load(index);
-            for ((local, value), length) in lists.iter().zip(lengths) {
-                // integer division truncates towards zero, which is equivalent to `div_floor` (the desired primitive here) for whole number values
-                let div = func.add_unspanned(naga::Expression::Binary {
-                    op: naga::BinaryOperator::Divide,
-                    left: iter_index,
-                    right: prev_section_len,
-                });
-                let index = func.add_unspanned(naga::Expression::Binary {
-                    op: naga::BinaryOperator::Modulo,
-                    left: div,
-                    right: length,
-                });
-                prev_section_len = func.add_preemit(naga::Expression::Binary {
-                    op: naga::BinaryOperator::Multiply,
-                    left: prev_section_len,
-                    right: length,
-                });
-                let val = func.load_typed_from_list(c, value, index);
-                func.store(*local, val.inner);
-            }
-            func.bind_assignments(c, &body.assignments);
-
-            // eval body
-            let scalar = compile_scalar(c, func, &body.value);
-
-            func.store_index_list_typed(&out, iter_index, scalar);
-
-            // pop scope
-            func.pop_frame(c);
-
-            let next_idx = func.increment(iter_index);
-
-            let should_break = func.add_unspanned(naga::Expression::Binary {
-                op: naga::BinaryOperator::GreaterEqual,
-                left: next_idx,
-                right: len,
-            });
-
-            // barrier
-            func.emit_exprs();
-
-            func.body.push(
-                Statement::If {
-                    condition: should_break,
-                    accept: Block::from_vec(vec![Statement::Break]),
-                    reject: Block::new(),
-                },
-                naga::Span::UNDEFINED,
-            );
-            // increment index
-            func.store(index, next_idx);
-
-            func.swap_block(&mut prev_body);
-            func.body.push(
-                Statement::Loop {
-                    body: prev_body,
-                    continuing: Block::new(),
-                    break_if: None,
-                },
-                naga::Span::UNDEFINED,
-            );
-            out
-        }
-
-        type_checker::Expression::BuiltIn(built_in) => todo!(),
+            type_checker::BuiltIn::JoinPoint => todo!(),
+            type_checker::BuiltIn::JoinPolygon => todo!(),
+            _ => unreachable!(),
+        },
         _ => unreachable!(),
     }
 }
@@ -629,12 +356,12 @@ fn compile_scalar(
                     | type_checker::BinaryOperator::IndexNumberList => {
                         func.push_frame(c);
                         let rhs = compile_scalar(c, func, right);
-                        let lhs = materialize_list(c, func, left);
+                        let lhs_list = collect_list(c, &left);
 
                         let idx = func.make_index(rhs.inner);
-                        let load = func.load_typed_from_list(c, &lhs, idx);
+                        let val = lhs_list.index(idx, c, func);
                         func.pop_frame(c);
-                        return load;
+                        return WithScalarType::new(left.ty.base(), val);
                     }
                     _ => unreachable!(),
                 }
@@ -738,7 +465,7 @@ fn compile_scalar(
             body,
         } => todo!(),
         type_checker::Expression::For { body, lists } => todo!(),
-        type_checker::Expression::BuiltIn(built_in) => todo!(),
+        type_checker::Expression::BuiltIn { name, args } => todo!(),
     };
     let h = if e.needs_pre_emit() {
         func.add_preemit(e)
