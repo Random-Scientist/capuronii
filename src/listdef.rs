@@ -388,7 +388,7 @@ impl MaybeSwitchBlock for WithEvalBlock<'_> {
     }
 }
 impl ListDef<'_> {
-    fn compute_len(
+    pub(crate) fn compute_len(
         &mut self,
         ctx: &mut Compiler,
         func: &mut CompilingFunction,

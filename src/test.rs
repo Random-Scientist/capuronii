@@ -29,7 +29,8 @@ fn test_to_mtl() {
     );
     let mut s = String::new();
     let c = Default::default();
-    let mut w = naga::back::hlsl::Writer::new(&mut s, &c);
+    let pc = Default::default();
+    let mut w = naga::back::hlsl::Writer::new(&mut s, &c, &pc);
     w.write(&m, &info, None).unwrap();
-    println!("Compiled HLSL: {}", s);
+    println!("Compiled HLSL: {s}");
 }

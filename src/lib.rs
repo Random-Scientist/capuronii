@@ -8,7 +8,7 @@ use naga::{
     LocalVariable, MathFunction, Module, ResourceBinding, Statement, StorageAccess, StructMember,
     UniqueArena,
 };
-use parse::type_checker::{self, BaseType, TypedExpression};
+use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
 use typed_index_collections::{TiSlice, TiVec, ti_vec};
 
 use crate::{
@@ -31,14 +31,6 @@ struct TyContext {
     point: Handle<naga::Type>,
     bool: Handle<naga::Type>,
     uvec3: Handle<naga::Type>,
-    stack_head_ptr: Handle<naga::Type>,
-}
-
-pub struct Iterator {
-    state: Handle<LocalVariable>,
-    next: Handle<Function>,
-    get_size: Handle<Function>,
-    ty: BaseType,
 }
 
 struct Compiler {
@@ -94,13 +86,6 @@ impl Compiler {
                 inner: naga::TypeInner::Vector {
                     size: naga::VectorSize::Tri,
                     scalar: naga::Scalar::U32,
-                },
-            }),
-            stack_head_ptr: module.types.add_unspanned(naga::Type {
-                name: Some(format!("StackHeadPtr")),
-                inner: naga::TypeInner::Pointer {
-                    base: _u32,
-                    space: AddressSpace::Function,
                 },
             }),
         };
@@ -261,7 +246,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             }),
         ),
         type_checker::Expression::BuiltIn { name, args } => match name {
-            type_checker::BuiltIn::JoinNumber => {
+            BuiltIn::JoinNumber | BuiltIn::JoinPoint => {
                 let mut current_scalar_batch = 0..0;
                 let mut listdefs = Vec::new();
                 for (idx, val) in args.iter().enumerate() {
@@ -294,9 +279,8 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
                     UntypedListDef::Join(Join { lists: listdefs }),
                 )
             }
-            type_checker::BuiltIn::JoinPoint => todo!(),
-            type_checker::BuiltIn::JoinPolygon => todo!(),
-            _ => unreachable!(),
+
+            _ => unimplemented!(),
         },
         _ => unreachable!(),
     }
@@ -473,8 +457,68 @@ fn compile_scalar(
             upper_bound,
             body,
         } => todo!(),
-        type_checker::Expression::For { body, lists } => todo!(),
-        type_checker::Expression::BuiltIn { name, args } => todo!(),
+        type_checker::Expression::BuiltIn { name, args } => match name {
+            BuiltIn::Ln => todo!(),
+            BuiltIn::Exp => todo!(),
+            BuiltIn::Erf => todo!(),
+            BuiltIn::Sin => todo!(),
+            BuiltIn::Cos => todo!(),
+            BuiltIn::Tan => todo!(),
+            BuiltIn::Sec => todo!(),
+            BuiltIn::Csc => todo!(),
+            BuiltIn::Cot => todo!(),
+            BuiltIn::Sinh => todo!(),
+            BuiltIn::Cosh => todo!(),
+            BuiltIn::Tanh => todo!(),
+            BuiltIn::Sech => todo!(),
+            BuiltIn::Csch => todo!(),
+            BuiltIn::Coth => todo!(),
+            BuiltIn::Asin => todo!(),
+            BuiltIn::Acos => todo!(),
+            BuiltIn::Atan => todo!(),
+            BuiltIn::Atan2 => todo!(),
+            BuiltIn::Asec => todo!(),
+            BuiltIn::Acsc => todo!(),
+            BuiltIn::Acot => todo!(),
+            BuiltIn::Asinh => todo!(),
+            BuiltIn::Acosh => todo!(),
+            BuiltIn::Atanh => todo!(),
+            BuiltIn::Asech => todo!(),
+            BuiltIn::Acsch => todo!(),
+            BuiltIn::Acoth => todo!(),
+            BuiltIn::Abs => todo!(),
+            BuiltIn::Sgn => todo!(),
+            BuiltIn::Round => todo!(),
+            BuiltIn::Floor => todo!(),
+            BuiltIn::Ceil => todo!(),
+            BuiltIn::Mod => todo!(),
+            BuiltIn::Midpoint => todo!(),
+            BuiltIn::Distance => todo!(),
+            BuiltIn::Min => todo!(),
+            BuiltIn::Max => todo!(),
+            BuiltIn::Median => todo!(),
+            BuiltIn::TotalNumber => todo!(),
+            BuiltIn::TotalPoint => todo!(),
+            BuiltIn::MeanNumber => todo!(),
+            BuiltIn::MeanPoint => todo!(),
+            BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
+                let arg = args.first().unwrap();
+                let l = collect_list(c, expr);
+                todo!()
+            }
+            BuiltIn::UniqueNumber => todo!(),
+            BuiltIn::UniquePoint => todo!(),
+            BuiltIn::UniquePolygon => todo!(),
+            BuiltIn::Sort => todo!(),
+            BuiltIn::SortKeyNumber => todo!(),
+            BuiltIn::SortKeyPoint => todo!(),
+            BuiltIn::SortKeyPolygon => todo!(),
+            BuiltIn::Polygon => todo!(),
+            BuiltIn::JoinNumber => todo!(),
+            BuiltIn::JoinPoint => todo!(),
+            BuiltIn::JoinPolygon => todo!(),
+        },
+        _ => unreachable!(),
     };
     let h = if e.needs_pre_emit() {
         func.add_preemit(e)
