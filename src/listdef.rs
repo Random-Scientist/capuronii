@@ -54,7 +54,7 @@ impl LazyBroadcast<'_> {
         let eval_in = func.in_eval();
         eval_in.push_frame(ctx);
         let r = compile_scalar(ctx, eval_in, self.body);
-        eval_in.pop_frame(ctx);
+        eval_in.pop_frame();
         r.inner
     }
 }
@@ -127,7 +127,7 @@ impl LazyComprehension<'_> {
         func.push_frame(ctx);
         func.bind_assignments(ctx, &self.body.assignments);
         let result = compile_scalar(ctx, func, &self.body.value);
-        func.pop_frame(ctx);
+        func.pop_frame();
 
         result.inner
     }
@@ -173,7 +173,11 @@ impl Join<'_> {
         let pre = blocks.in_body();
         let mut curr_start_idx = pre.zero_u32;
 
-        let val_out = pre.new_local(ctx.scalar_type(self.lists.first().unwrap().ty), None);
+        let val_out = pre.new_local(
+            ctx.scalar_type(self.lists.first().unwrap().ty),
+            None,
+            Some(format!("join_output_{}", pre.local_variables.len())),
+        );
 
         let mut body_block = blocks.in_eval().new_block();
 
@@ -253,8 +257,8 @@ impl Filter<'_> {
         });
 
         let out_ty = self.src.ty;
-        let iter_index = func.new_local(ctx.types.u32, Some(func.zero_u32));
-        let out_len = func.new_local(ctx.types.u32, Some(func.zero_u32));
+        let iter_index = func.new_local_index(ctx);
+        let out_len = func.new_local_index(ctx);
 
         let out_base_addr = func.load_stack_head();
 
@@ -265,7 +269,7 @@ impl Filter<'_> {
 
         let mut other = WithEvalBlock {
             other: function_body,
-            func: func,
+            func,
             in_eval: true,
         };
 
@@ -275,8 +279,8 @@ impl Filter<'_> {
         let result = self.src.index(this_iter_index, ctx, &mut other);
 
         let func = other.in_eval();
-        func.emit_exprs();
-        func.store_to_top_of_stack_typed(ScalarRef::new(out_ty, result));
+
+        func.store_to_top_of_stack_typed(ctx, ScalarRef::new(out_ty, result));
 
         let current_out_len = func.load(out_len);
 
@@ -331,6 +335,7 @@ impl Filter<'_> {
             naga::Span::UNDEFINED,
         );
         let len = func.load(out_len);
+
         MaterializedList::Temporary(StackAlloc {
             base_addr: out_base_addr,
             len,
@@ -462,7 +467,7 @@ impl ListDef<'_> {
                         .map(|e| {
                             func.push_frame(ctx);
                             let r = compile_scalar(ctx, func, e).inner;
-                            func.pop_frame(ctx);
+                            func.pop_frame();
                             r
                         })
                         .collect();
@@ -498,7 +503,7 @@ impl ListDef<'_> {
             _ => {
                 let out_ty = self.ty;
                 let len = self.compute_len(ctx, func);
-                let iter_index = func.new_local(ctx.types.u32, Some(func.zero_u32));
+                let iter_index = func.new_local_index(ctx);
                 let alloc = func.alloc_list(ctx, self.ty, len);
                 let body = func.new_block();
 
@@ -533,7 +538,7 @@ impl ListDef<'_> {
                     },
                     naga::Span::UNDEFINED,
                 );
-                func.pop_frame(ctx);
+                func.pop_frame();
                 let _ = b.in_body();
                 let WithEvalBlock {
                     other: body, func, ..

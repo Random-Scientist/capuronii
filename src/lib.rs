@@ -12,7 +12,7 @@ use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
 use typed_index_collections::{TiSlice, TiVec, ti_vec};
 
 use crate::{
-    alloc::{StackAlloc, StackState},
+    alloc::StackAlloc,
     function::CompilingFunction,
     listdef::{
         Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
@@ -37,10 +37,10 @@ struct Compiler {
     global_assignments: HashMap<usize, type_checker::Assignment>,
     module: Module,
     types: TyContext,
-    uniforms: Handle<GlobalVariable>,
+    constant_buffer: Handle<GlobalVariable>,
     list_buf: Handle<GlobalVariable>,
+    out_buf: Handle<GlobalVariable>,
     heap_per_invocation: u32,
-    stack: StackState,
     // each value in the map is of type ptr<function, Scalar> and points to a local unique to a given assignment binding
     pub(crate) assignments: HashMap<usize, Assignment>,
 }
@@ -60,25 +60,25 @@ impl Compiler {
         io_map: HashMap<usize, GpuInput>,
     ) -> Self {
         let mut module = Module::default();
-        let _u32 = module.types.add_unspanned(naga::Type {
-            name: "Int".to_string().into(),
-            inner: naga::TypeInner::Scalar(naga::Scalar::U32),
-        });
+
         let ty_ctx = TyContext {
-            u32: _u32,
+            u32: module.types.add_unspanned(naga::Type {
+                name: "u32".to_string().into(),
+                inner: naga::TypeInner::Scalar(naga::Scalar::U32),
+            }),
             f32: module.types.add_unspanned(naga::Type {
-                name: "Number".to_string().into(),
+                name: "f32".to_string().into(),
                 inner: naga::TypeInner::Scalar(naga::Scalar::F32),
             }),
             point: module.types.add_unspanned(naga::Type {
-                name: "Point".to_string().into(),
+                name: "vec2".to_string().into(),
                 inner: naga::TypeInner::Vector {
                     size: naga::VectorSize::Bi,
                     scalar: naga::Scalar::F32,
                 },
             }),
             bool: module.types.add_unspanned(naga::Type {
-                name: "Bool".to_string().into(),
+                name: "bool".to_string().into(),
                 inner: naga::TypeInner::Scalar(naga::Scalar::BOOL),
             }),
             uvec3: module.types.add_unspanned(naga::Type {
@@ -98,8 +98,8 @@ impl Compiler {
                 stride: 4,
             },
         });
-        let uniforms = module.global_variables.add_unspanned(GlobalVariable {
-            name: "Constant List Buffer".to_string().into(),
+        let constant_buffer = module.global_variables.add_unspanned(GlobalVariable {
+            name: "Constant Buffer".to_string().into(),
             space: AddressSpace::Storage {
                 access: StorageAccess::LOAD,
             },
@@ -135,26 +135,32 @@ impl Compiler {
             init: None,
         });
 
-        let stack = StackState::new();
         let global_assignments = global_assignments.into_iter().map(|v| (v.id, v)).collect();
         Self {
             module,
             types: ty_ctx,
-            uniforms,
+            constant_buffer,
             list_buf,
-            stack,
             global_assignments,
             heap_per_invocation,
+            out_buf,
             assignments: HashMap::new(),
         }
     }
 
-    fn compile_expr(&mut self, expr: &TypedExpression) -> Handle<Function> {
+    fn compile_expr(&mut self, expr: &TypedExpression) {
         let mut func = CompilingFunction::new_primary(self);
         let ret = compile_scalar(self, &mut func, expr);
 
         let func = func.done(self, ret);
-        self.module.functions.add_unspanned(func)
+        self.module.entry_points.push(naga::EntryPoint {
+            name: "capuronii_main".into(),
+            stage: naga::ShaderStage::Compute,
+            early_depth_test: None,
+            workgroup_size: [64, 1, 1],
+            workgroup_size_overrides: None,
+            function: func,
+        });
     }
     fn scalar_type(&self, scalar: BaseType) -> Handle<naga::Type> {
         match scalar {
@@ -353,7 +359,7 @@ fn compile_scalar(
 
                         let idx = func.make_index(rhs.inner);
                         let val = lhs_list.index(idx, c, func);
-                        func.pop_frame(c);
+                        func.pop_frame();
                         return WithScalarType::new(left.ty.base(), val);
                     }
                     _ => unreachable!(),
