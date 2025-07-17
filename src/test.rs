@@ -10,7 +10,7 @@ use crate::compile;
 #[test]
 fn test_to_mtl() {
     //let tex = r"c = [ (a, \{ b > 2: [1,2,3,4], a > 2: [4,3,2,1], 1 \}[2] ) \operatorname{for} a = [1,2,3,4], b = [1,3,5] ][2]";
-    let tex = r"(\operatorname{join}([1,2,3][[1,2,3]>1], [1,2,3] + 2, 3, 4, 5, )[a] \operatorname{for} a = [3,4])[1]";
+    let tex = r"\{1>2:[1,2,3], a \operatorname{for} a = [1,2,3] \}[1]";
     let tex = latex_parser::parse_latex(tex).unwrap();
     let expr = parse_expression_list_entry(&tex).unwrap();
     let (a, b) = resolve_names(&ti_vec![expr]);

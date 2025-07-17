@@ -16,7 +16,7 @@ use crate::{
     function::CompilingFunction,
     listdef::{
         Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
-        StackList, UntypedListDef,
+        Select, StackList, UntypedListDef,
     },
 };
 
@@ -222,7 +222,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
                 | type_checker::BinaryOperator::FilterPointList => ListDef::new(
                     base,
                     listdef::UntypedListDef::Filter(Filter {
-                        src: Box::new(collect_list(c, &left)),
+                        src: Box::new(collect_list(c, left)),
                         filter,
                     }),
                 ),
@@ -233,7 +233,16 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             test,
             consequent,
             alternate,
-        } => todo!(),
+        } => ListDef::new(
+            expr.ty.base(),
+            UntypedListDef::Select(Select {
+                test,
+                consequent_alternate: Box::new((
+                    collect_list(c, &consequent),
+                    collect_list(c, &alternate),
+                )),
+            }),
+        ),
         type_checker::Expression::SumProd {
             kind,
             variable,
@@ -294,7 +303,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
 
 fn compile_scalar(
     c: &mut Compiler,
-    func: &mut CompilingFunction,
+    mut func: &mut CompilingFunction,
     expr: &TypedExpression,
 ) -> ScalarRef {
     let e = match &expr.e {
@@ -358,7 +367,7 @@ fn compile_scalar(
                         let lhs_list = collect_list(c, &left);
 
                         let idx = func.make_index(rhs.inner);
-                        let val = lhs_list.index(idx, c, func);
+                        let val = lhs_list.index(idx, c, &mut func);
                         func.pop_frame();
                         return WithScalarType::new(left.ty.base(), val);
                     }
