@@ -19,10 +19,10 @@ use crate::{
         Select, StackList, UntypedListDef,
     },
 };
-
 mod alloc;
 mod function;
 mod listdef;
+mod symath;
 #[cfg(test)]
 mod test;
 struct TyContext {
