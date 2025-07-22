@@ -1,4 +1,4 @@
-use std::{io::stdin, iter::once, thread::sleep, time::Duration};
+use std::iter::once;
 
 use capuronii::compile;
 use naga::valid::Validator;
@@ -8,10 +8,9 @@ use parse::{
 };
 use typed_index_collections::ti_vec;
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BufferBinding, BufferDescriptor, BufferUsages, ComputePassDescriptor,
-    ComputePipelineDescriptor, DownlevelFlags, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, util::DeviceExt,
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+    BufferDescriptor, BufferUsages, ComputePassDescriptor, ComputePipelineDescriptor,
+    DownlevelFlags, PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
     wgt::CommandEncoderDescriptor,
 };
 
@@ -188,4 +187,9 @@ fn test_main() {
     dbg!(&test_case("[1,2,3][1]")[0]);
     dbg!(&test_case("[1,2,3,4][[1,2,3]>2][1]")[0]);
     dbg!(&test_case("[1,2,3,4][ [ ([1,2][[1,2]> 1])[1] , 2 , 3] > 2 ][1]")[0]);
+    dbg!(
+        &test_case(
+            r"[ (a, \{ b > 2: [1,2,3,4], a > 2: [4,3,2,1], 1 \}[2] ) \operatorname{for} a = [1,2,3,4], b = [1,3,5] ][2]"
+        )[0..2]
+    );
 }

@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    fmt::{self, Display, Write},
-};
+use std::fmt::{self, Display, Write};
 
 use crate::symath::{BinaryOp, Block, Exactly, SymHandle, SymathCompiling, SymathValue};
 #[derive(Debug, Clone, Copy)]

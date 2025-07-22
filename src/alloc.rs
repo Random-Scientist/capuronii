@@ -1,4 +1,4 @@
-use naga::{BinaryOperator, Expression, Handle, Literal};
+use naga::{BinaryOperator, Expression, Handle};
 
 use crate::{Compiler, function::CompilingFunction};
 #[derive(Debug, Clone, Copy)]

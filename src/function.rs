@@ -6,14 +6,14 @@ use std::{
 };
 
 use naga::{
-    Block, Expression, Function, FunctionArgument, FunctionResult, Handle, LocalVariable, Span,
+    Block, Expression, Function, FunctionArgument, Handle, LocalVariable, Span,
     Statement, Type,
 };
 use parse::type_checker::{self, BaseType};
 
 use crate::{
-    ArenaExt, Compiler, ScalarRef, StackList, WithScalarType, alloc::StackAlloc, collect_list,
-    compile_scalar, listdef::MaterializedList,
+    ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc, collect_list,
+    compile_scalar,
 };
 
 const POINT_SIZE: u32 = 2;

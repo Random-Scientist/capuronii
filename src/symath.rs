@@ -1,31 +1,91 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
     fmt::Debug,
     marker::PhantomData,
-    mem::{take, transmute},
-    num::{NonZeroU32, NonZeroUsize},
-    ops::{Add, AddAssign, Deref, Div, DivAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign},
-    ptr,
+    mem::take,
+    num::NonZeroUsize,
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign},
 };
-
-use crate::symath::{backends::rust::compile_to_rust, numeric::double_single::Dsym};
 
 pub mod backends;
 pub mod numeric;
+
+pub(crate) trait Runtime:
+    Add<Output = Self>
+    + AddAssign
+    + Sub<Output = Self>
+    + SubAssign
+    + Mul<Output = Self>
+    + MulAssign
+    + Div<Output = Self>
+    + DivAssign
+    + Neg<Output = Self>
+    + From<Exactly>
+    + Copy
+{
+}
+impl Runtime for fsym {}
+
+/// Computes 2^(floor(bits / 2) + 1) + 1
+/// Value only changes every 2 increments, this gives a correct result for significand bitdepths both with and without the implied leading 1
+const fn compute_splitter(num_significand_bits: u32) -> u32 {
+    assert!(num_significand_bits > 3);
+    let n = num_significand_bits / 2 + 1;
+    2u32.pow(n) + 1
+}
+impl From<Exactly> for f64 {
+    fn from(value: Exactly) -> Self {
+        // 53 significand bits
+        const F64_SPLITTER: f64 = compute_splitter(53) as f64;
+        match value {
+            Exactly::Rational(rat) => {
+                let mut val = rat.frac.0 as f64 / rat.frac.1 as f64;
+                if !rat.is_positive {
+                    val = -val;
+                }
+                val
+            }
+            Exactly::Special(special) => match special {
+                crate::symath::Special::Pi => std::f64::consts::PI,
+                crate::symath::Special::Splitter => F64_SPLITTER,
+            },
+        }
+    }
+}
+impl From<Exactly> for f32 {
+    fn from(value: Exactly) -> Self {
+        // 24 significant bits
+        const F32_SPLITTER: f32 = compute_splitter(24) as f32;
+        match value {
+            Exactly::Rational(rat) => {
+                let mut val = rat.frac.0 as f32 / rat.frac.1 as f32;
+                if !rat.is_positive {
+                    val = -val;
+                }
+                val
+            }
+            Exactly::Special(special) => match special {
+                crate::symath::Special::Pi => std::f32::consts::PI,
+                crate::symath::Special::Splitter => F32_SPLITTER,
+            },
+        }
+    }
+}
+impl Runtime for f32 {}
+impl Runtime for f64 {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rational64 {
     is_positive: bool,
     frac: (u64, u64),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Special {
+pub enum Special {
     Pi,
-    // 2 ^ div_floor (num fraction bits, 2)
+    /// See [`compute_splitter`]
     Splitter,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Exactly {
+pub enum Exactly {
     Rational(Rational64),
     Special(Special),
 }
@@ -357,7 +417,7 @@ macro_rules! symath_func {
         $crate::symath::symath_compile(
             || {
                 $(
-                    let $arg = input(::std::stringify!($arg));
+                    let $arg = $crate::symath::input(::std::stringify!($arg));
                 )*
                 $(
                     $body
@@ -368,18 +428,21 @@ macro_rules! symath_func {
 
     };
 }
-#[test]
-fn test_symath() {
-    let c = symath_func! {
-        fn test(a, b) {
-            let d = Dsym { a, b };
-            let b = Dsym::from_single(200.into());
-            let mut s = d + b;
-            s *= fsym::from(2);
-            s *= s;
-            let s = s / s;
-        }
-    };
-    dbg!(&c);
-    println!("{}", compile_to_rust(&c, Default::default()));
+#[cfg(test)]
+mod test {
+    use crate::symath::{fsym, numeric::double_single::DoubleSingle};
+
+    #[test]
+    fn test_symath() {
+        let c = symath_func! {
+            fn test(a, b) {
+                let d = DoubleSingle { a, b };
+                let b: DoubleSingle<fsym> = DoubleSingle::from_single(200.into());
+                let mut s = d + b;
+                s *= fsym::from(2);
+                s *= s;
+                let s = s / s;
+            }
+        };
+    }
 }

@@ -1,18 +1,13 @@
-use std::{
-    collections::HashMap,
-    mem::{self, discriminant},
-};
+use std::collections::HashMap;
 
 use naga::{
-    AddressSpace, Arena, Block, Function, FunctionArgument, FunctionResult, GlobalVariable, Handle,
-    LocalVariable, MathFunction, Module, ResourceBinding, Statement, StorageAccess, StructMember,
+    AddressSpace, Arena, GlobalVariable, Handle, MathFunction, Module, ResourceBinding, StorageAccess,
     UniqueArena,
 };
 use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
-use typed_index_collections::{TiSlice, TiVec, ti_vec};
+use typed_index_collections::{TiVec, ti_vec};
 
 use crate::{
-    alloc::StackAlloc,
     function::CompilingFunction,
     listdef::{
         Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
@@ -213,7 +208,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             left,
             right,
         } => {
-            let right = collect_list(c, &right);
+            let right = collect_list(c, right);
             let UntypedListDef::Broadcast(filter) = right.inner else {
                 panic!()
             };
@@ -238,8 +233,8 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             UntypedListDef::Select(Select {
                 test,
                 consequent_alternate: Box::new((
-                    collect_list(c, &consequent),
-                    collect_list(c, &alternate),
+                    collect_list(c, consequent),
+                    collect_list(c, alternate),
                 )),
             }),
         ),
@@ -364,7 +359,7 @@ fn compile_scalar(
                     | type_checker::BinaryOperator::IndexNumberList => {
                         func.push_frame(c);
                         let rhs = compile_scalar(c, func, right);
-                        let lhs_list = collect_list(c, &left);
+                        let lhs_list = collect_list(c, left);
 
                         let idx = func.make_index(rhs.inner);
                         let val = lhs_list.index(idx, c, &mut func);
@@ -458,7 +453,7 @@ fn compile_scalar(
             alternate,
         } => {
             let [condition, accept, reject] =
-                [test, consequent, alternate].map(|a| compile_scalar(c, func, &a).inner);
+                [test, consequent, alternate].map(|a| compile_scalar(c, func, a).inner);
             naga::Expression::Select {
                 condition,
                 accept,

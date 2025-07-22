@@ -1,11 +1,11 @@
-use std::{num::NonZeroU32, thread::current};
+use std::num::NonZeroU32;
 
 use naga::{Block, Handle, Statement};
 use parse::type_checker::{self, Assignment, BaseType};
-use replace_with::{replace_with, replace_with_or_abort};
+use replace_with::replace_with_or_abort;
 
 use crate::{
-    ArenaExt, Compiler, ScalarRef, WithScalarType, alloc::StackAlloc, collect_list, compile_scalar,
+    ArenaExt, Compiler, ScalarRef, WithScalarType, alloc::StackAlloc, compile_scalar,
     function::CompilingFunction,
 };
 
@@ -486,7 +486,7 @@ impl ListDef<'_> {
                 });
                 let result = func.new_local(ctx.types.u32, None, None);
 
-                let mut outer = func.new_block();
+                let outer = func.new_block();
                 let consequent_len = select.consequent_alternate.0.compute_len_inner(ctx, func);
                 func.store(result, consequent_len);
                 let consequent = func.new_block();
