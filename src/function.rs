@@ -6,23 +6,48 @@ use std::{
 };
 
 use naga::{
-    Block, Expression, Function, FunctionArgument, Handle, LocalVariable, Span,
-    Statement, Type,
+    Block, Expression, Function, FunctionArgument, Handle, LocalVariable, Span, Statement, Type,
 };
 use parse::type_checker::{self, BaseType};
 
 use crate::{
-    ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc, collect_list,
-    compile_scalar,
+    ArenaExt, Compiler, ScalarRef, StackList, alloc::StackAlloc, collect_list, compile_scalar,
 };
 
 const POINT_SIZE: u32 = 2;
-
-#[derive(Debug)]
-pub struct CompilingFunction {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Constants {
+    pub(crate) zero_f32: Handle<Expression>,
+    pub(crate) one_f32: Handle<Expression>,
+    pub(crate) max_f32: Handle<Expression>,
+    pub(crate) log2_max_f32: Handle<Expression>,
+    pub(crate) canonical_nan: Handle<Expression>,
     pub(crate) zero_u32: Handle<Expression>,
     pub(crate) one_u32: Handle<Expression>,
+    pub(crate) true_bool: Handle<Expression>,
+    pub(crate) false_bool: Handle<Expression>,
     pub(crate) point_size_u32: Handle<Expression>,
+}
+impl Constants {
+    fn new(func: &mut Function) -> Self {
+        let mut lit = |l| func.expressions.add_unspanned(Expression::Literal(l));
+        Self {
+            zero_f32: lit(naga::Literal::F32(0.0)),
+            one_f32: lit(naga::Literal::F32(1.0)),
+            max_f32: lit(naga::Literal::F32(f32::MAX)),
+            log2_max_f32: lit(naga::Literal::F32(f32::MAX.log2())),
+            canonical_nan: lit(naga::Literal::U32(0b111111111 << 22)),
+            zero_u32: lit(naga::Literal::U32(0)),
+            one_u32: lit(naga::Literal::U32(1)),
+            true_bool: lit(naga::Literal::U32(POINT_SIZE)),
+            false_bool: lit(naga::Literal::Bool(true)),
+            point_size_u32: lit(naga::Literal::Bool(false)),
+        }
+    }
+}
+#[derive(Debug)]
+pub struct CompilingFunction {
+    pub(crate) constants: Constants,
     pub(crate) invocation_id_u32: Handle<Expression>,
     pub(crate) frame_size_tallies: Vec<Option<Handle<Expression>>>,
 
@@ -54,25 +79,16 @@ impl CompilingFunction {
         stack_head: Handle<Expression>,
         stack_ptr: Handle<Expression>,
     ) -> Self {
-        let zero_u32 = func
-            .expressions
-            .add_unspanned(Expression::Literal(naga::Literal::U32(0)));
-        let one_u32 = func
-            .expressions
-            .add_unspanned(Expression::Literal(naga::Literal::U32(1)));
-        let point_size_u32 = func
-            .expressions
-            .add_unspanned(Expression::Literal(naga::Literal::U32(POINT_SIZE)));
+        let constants = Constants::new(&mut func);
+        let invocation_id_u32 = constants.zero_u32;
         Self {
+            constants,
             last_emit: 0,
             func,
             stack_head,
             stack_array_ptr: stack_ptr,
-            zero_u32,
-            one_u32,
             stack_head_cache: None,
-            point_size_u32,
-            invocation_id_u32: zero_u32,
+            invocation_id_u32,
             frame_size_tallies: Vec::new(),
         }
     }
@@ -173,7 +189,7 @@ impl CompilingFunction {
         });
         func.invocation_id_u32 = flattened_inv_id;
         let heap_per_invocation = func.add_preemit(naga::Expression::Literal(naga::Literal::U32(
-            ctx.heap_per_invocation,
+            ctx.config.heap_per_invocation,
         )));
         let heap_offset = func.add_unspanned(naga::Expression::Binary {
             op: naga::BinaryOperator::Multiply,
@@ -293,13 +309,13 @@ impl CompilingFunction {
         self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
             left: val,
-            right: self.one_u32,
+            right: self.constants.one_u32,
         })
     }
     pub(crate) fn size_of_scalar(&self, ty: BaseType) -> Handle<Expression> {
         match ty {
-            BaseType::Number => self.one_u32,
-            BaseType::Point => self.point_size_u32,
+            BaseType::Number => self.constants.one_u32,
+            BaseType::Point => self.constants.point_size_u32,
             BaseType::Bool => todo!(),
             BaseType::Empty => todo!(),
             BaseType::Polygon => todo!(),
@@ -325,7 +341,7 @@ impl CompilingFunction {
     pub(crate) fn new_local_index(&mut self, ctx: &Compiler) -> Handle<Expression> {
         self.new_local(
             ctx.types.u32,
-            Some(self.zero_u32),
+            Some(self.constants.zero_u32),
             Some(format!("iteration_var_{}", self.local_variables.len())),
         )
     }
@@ -356,7 +372,7 @@ impl CompilingFunction {
     ) {
         for assignment in assignments {
             if assignment.value.ty.is_list() {
-                let def = collect_list(ctx, &assignment.value);
+                let def = collect_list(&assignment.value);
                 let mat = def.materialize(ctx, self);
                 ctx.bind_list_assignment(assignment.id, mat);
             } else {
@@ -453,7 +469,7 @@ impl CompilingFunction {
             h = self.add_unspanned(Expression::Binary {
                 op: naga::BinaryOperator::Divide,
                 left: h,
-                right: self.point_size_u32,
+                right: self.constants.point_size_u32,
             })
         }
         h
@@ -468,7 +484,7 @@ impl CompilingFunction {
             len = self.add_unspanned(Expression::Binary {
                 op: naga::BinaryOperator::Multiply,
                 left: len,
-                right: self.point_size_u32,
+                right: self.constants.point_size_u32,
             })
         }
         StackList::new(ty, self.alloc(ctx, len))
@@ -566,7 +582,14 @@ impl CompilingFunction {
         self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Subtract,
             left: cast,
-            right: self.one_u32,
+            right: self.constants.one_u32,
+        })
+    }
+    pub(crate) fn u32_to_float(&mut self, number: Handle<Expression>) -> Handle<Expression> {
+        self.add_unspanned(Expression::As {
+            expr: number,
+            kind: naga::ScalarKind::Float,
+            convert: Some(4),
         })
     }
 }

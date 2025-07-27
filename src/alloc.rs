@@ -34,7 +34,7 @@ impl CompilingFunction {
         } else {
             let local = self.new_local(
                 ctx.types.u32,
-                Some(self.zero_u32),
+                Some(self.constants.zero_u32),
                 Some(format!("stack_frame_{}", self.frame_size_tallies.len())),
             );
             *self.frame_size_tallies.last_mut().unwrap() = Some(local);

@@ -94,7 +94,7 @@ impl LazyComprehension<'_> {
             .collect();
         // Determine and index comprehension varyings
         // TODO make this only update a given varying binding when its index changes
-        let mut prev_section_len = pre.one_u32;
+        let mut prev_section_len = pre.constants.one_u32;
         for ((assignment, value), length) in self.varying.into_iter().zip(lengths) {
             let out_ty = value.ty;
             let func = blocks.in_inner();
@@ -171,7 +171,7 @@ impl Join<'_> {
         blocks: &mut impl MaybeSwitchBlock,
     ) -> Handle<naga::Expression> {
         let pre = blocks.in_outer();
-        let mut curr_start_idx = pre.zero_u32;
+        let mut curr_start_idx = pre.constants.zero_u32;
 
         let val_out = pre.new_local(
             ctx.scalar_type(self.lists.first().unwrap().ty),
@@ -457,7 +457,7 @@ impl ListDef<'_> {
                     })
                 }
                 MaterializedList::Static(static_list) => static_list.len,
-                MaterializedList::Empty => func.zero_u32,
+                MaterializedList::Empty => func.constants.zero_u32,
             },
             UntypedListDef::Broadcast(lazy_broadcast) => lazy_broadcast.compute_len(ctx, func),
             UntypedListDef::Comprehension(lazy_comprehension) => {

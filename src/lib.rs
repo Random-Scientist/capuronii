@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use naga::{
-    AddressSpace, Arena, GlobalVariable, Handle, MathFunction, Module, ResourceBinding, StorageAccess,
-    UniqueArena,
+    AddressSpace, Arena, GlobalVariable, Handle, MathFunction, Module, ResourceBinding,
+    StorageAccess, UniqueArena,
 };
 use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
+use std::collections::HashMap;
 use typed_index_collections::{TiVec, ti_vec};
 
 use crate::{
@@ -17,9 +16,37 @@ use crate::{
 mod alloc;
 mod function;
 mod listdef;
+mod math_impl;
 mod symath;
 #[cfg(test)]
 mod test;
+
+struct CompilerConfig {
+    /// Maximum size of the arena allocated for each invocation in intervals of 4 bytes (e.g. setting this value to 10 implies a >=40 byte long backing heap buffer)
+    heap_per_invocation: u32,
+    /// Map of [`Identifier`](parse::type_checker::Expression::Identifier)s to override with a dynamic GPU value
+    io_map: Vec<(usize, GpuInput)>,
+    /// Whether to assume that all numbers produced by the expression are finite.
+    /// This falls back to the WGSL semantics; when an operation would return ±inf
+    /// or NaN under IEEE it is permitted to return an arbitrary value instead.
+    /// This allows us to generate **much** faster code because we don't have to emulate NaN checking in software
+    assume_numbers_finite: bool,
+    /// Whether to "NaN box" and propagate the source expressions of NaNs
+    /// Only affects generated code when [`CompilerConfig::assume_numbers_finite`] is `false`
+    /// Note: may further reduce performance of the generated code for NaN propagation.
+    do_nan_tracking: bool,
+}
+impl Default for CompilerConfig {
+    fn default() -> Self {
+        Self {
+            heap_per_invocation: 20000,
+            io_map: Vec::new(),
+            do_nan_tracking: false,
+            assume_numbers_finite: false,
+        }
+    }
+}
+
 struct TyContext {
     u32: Handle<naga::Type>,
     f32: Handle<naga::Type>,
@@ -35,14 +62,16 @@ struct Compiler {
     constant_buffer: Handle<GlobalVariable>,
     list_buf: Handle<GlobalVariable>,
     out_buf: Handle<GlobalVariable>,
-    heap_per_invocation: u32,
-    // each value in the map is of type ptr<function, Scalar> and points to a local unique to a given assignment binding
+
+    config: CompilerConfig,
+
     pub(crate) assignments: HashMap<usize, Assignment>,
 }
 
 /// Index into the currently bound constant/input buffer. The value at this index at the time of invocation contains the indirect address of the value
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FixedInputId(u32);
+
 pub enum GpuInput {
     // Only supports scalars atm
     Varying(BaseType),
@@ -50,9 +79,8 @@ pub enum GpuInput {
 }
 impl Compiler {
     fn new(
-        heap_per_invocation: u32,
+        config: CompilerConfig,
         global_assignments: TiVec<type_checker::AssignmentIndex, type_checker::Assignment>,
-        io_map: HashMap<usize, GpuInput>,
     ) -> Self {
         let mut module = Module::default();
 
@@ -137,9 +165,10 @@ impl Compiler {
             constant_buffer,
             list_buf,
             global_assignments,
-            heap_per_invocation,
+
             out_buf,
             assignments: HashMap::new(),
+            config,
         }
     }
 
@@ -172,11 +201,11 @@ impl Compiler {
 }
 
 pub fn compile(expr: &TypedExpression) -> Module {
-    let mut ctx = Compiler::new(20000, ti_vec![], HashMap::new());
+    let mut ctx = Compiler::new(Default::default(), ti_vec![]);
     ctx.compile_expr(expr);
     ctx.module
 }
-pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> ListDef<'a> {
+pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
     let base = expr.ty.base();
     match &expr.e {
         type_checker::Expression::Identifier(_) => todo!(),
@@ -197,7 +226,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             listdef::UntypedListDef::Broadcast(LazyBroadcast {
                 varying: vectors
                     .iter()
-                    .map(|l| (l.id, collect_list(c, &l.value)))
+                    .map(|l| (l.id, collect_list(&l.value)))
                     .collect(),
                 body,
                 scalars,
@@ -208,7 +237,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             left,
             right,
         } => {
-            let right = collect_list(c, right);
+            let right = collect_list(right);
             let UntypedListDef::Broadcast(filter) = right.inner else {
                 panic!()
             };
@@ -217,7 +246,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
                 | type_checker::BinaryOperator::FilterPointList => ListDef::new(
                     base,
                     listdef::UntypedListDef::Filter(Filter {
-                        src: Box::new(collect_list(c, left)),
+                        src: Box::new(collect_list(left)),
                         filter,
                     }),
                 ),
@@ -232,10 +261,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             expr.ty.base(),
             UntypedListDef::Select(Select {
                 test,
-                consequent_alternate: Box::new((
-                    collect_list(c, consequent),
-                    collect_list(c, alternate),
-                )),
+                consequent_alternate: Box::new((collect_list(consequent), collect_list(alternate))),
             }),
         ),
         type_checker::Expression::SumProd {
@@ -250,7 +276,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
             UntypedListDef::Comprehension(LazyComprehension {
                 varying: lists
                     .iter()
-                    .map(|a| (a.id, collect_list(c, &a.value)))
+                    .map(|a| (a.id, collect_list(&a.value)))
                     .collect(),
                 body,
             }),
@@ -271,7 +297,7 @@ pub(crate) fn collect_list<'a>(c: &mut Compiler, expr: &'a TypedExpression) -> L
                         }
                         current_scalar_batch.start = idx + 1;
                         current_scalar_batch.end = idx + 1;
-                        listdefs.push(collect_list(c, val));
+                        listdefs.push(collect_list(val));
                     } else {
                         current_scalar_batch.end += 1;
                     }
@@ -359,7 +385,7 @@ fn compile_scalar(
                     | type_checker::BinaryOperator::IndexNumberList => {
                         func.push_frame(c);
                         let rhs = compile_scalar(c, func, right);
-                        let lhs_list = collect_list(c, left);
+                        let lhs_list = collect_list(left);
 
                         let idx = func.make_index(rhs.inner);
                         let val = lhs_list.index(idx, c, &mut func);
@@ -512,9 +538,9 @@ fn compile_scalar(
             BuiltIn::MeanNumber => todo!(),
             BuiltIn::MeanPoint => todo!(),
             BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
-                let arg = args.first().unwrap();
-                let l = collect_list(c, expr);
-                todo!()
+                let l = collect_list(expr);
+                let l = l.compute_len(c, func);
+                return WithScalarType::new(BaseType::Number, func.u32_to_float(l));
             }
             BuiltIn::UniqueNumber => todo!(),
             BuiltIn::UniquePoint => todo!(),
