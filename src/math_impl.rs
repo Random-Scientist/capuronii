@@ -140,28 +140,39 @@ impl CompilingFunction {
         let labs = self.raw_abs(lhs);
         let rabs = self.raw_abs(rhs);
 
-        let (min, max) = (
-            self.add_unspanned(Expression::Math {
-                fun: naga::MathFunction::Min,
-                arg: labs,
-                arg1: Some(rabs),
-                arg2: None,
-                arg3: None,
-            }),
-            self.add_unspanned(Expression::Math {
-                fun: naga::MathFunction::Max,
-                arg: labs,
-                arg1: Some(rabs),
-                arg2: None,
-                arg3: None,
-            }),
-        );
-        let a_clamped = self.clamp_1_to_max(min);
+        let test = self.add_unspanned(Expression::Binary {
+            op: naga::BinaryOperator::Greater,
+            left: labs,
+            right: rabs,
+        });
+
+        let max_mag = self.add_unspanned(Expression::Select {
+            condition: test,
+            accept: lhs,
+            reject: rhs,
+        });
+
+        let min_mag = self.add_unspanned(Expression::Select {
+            condition: test,
+            accept: rhs,
+            reject: lhs,
+        });
+        let max_abs = self.add_unspanned(Expression::Select {
+            condition: test,
+            accept: labs,
+            reject: rabs,
+        });
+
+        // clamp abs(max_mag) to 1.. and take the log
+        let a_clamped = self.clamp_1_to_max(max_abs);
+
         let log_a = self.raw_log2(a_clamped);
+
+        // compute log2( clamp( abs( 1 + min_mag/max_mag ), 1, f32::MAX ) )
         let b_a = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Divide,
-            left: min,
-            right: max,
+            left: max_mag,
+            right: min_mag,
         });
         let b_a_1 = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
