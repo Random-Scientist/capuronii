@@ -95,7 +95,7 @@ impl CompilingFunction {
     fn abs_log2(&mut self, float: Handle<Expression>) -> Handle<Expression> {
         // take the absolute value; we only care about extracting magnitude information
         let abs = self.raw_abs(float);
-        // clamp abs(x) to 1.., which prevents causing NaN by log(-inf..0)
+        // clamp abs(x) to 1.., which prevents causing NaN by log(-inf..=0)
         let abs = self.clamp_1_to_max(abs);
         self.raw_log2(abs)
     }
@@ -191,31 +191,6 @@ impl CompilingFunction {
             right: self.constants.log2_max_f32,
         })
     }
-    fn operands_true_or<const N: usize>(
-        &mut self,
-        operands: [Handle<Expression>; N],
-        result: Handle<Expression>,
-    ) -> Handle<Expression> {
-        let mut prev = None;
-        const { assert!(N > 0) };
-        for op in operands {
-            if let Some(a) = prev {
-                prev = Some(self.add_unspanned(Expression::Binary {
-                    op: naga::BinaryOperator::LogicalOr,
-                    left: a,
-                    right: op,
-                }));
-            } else {
-                prev = Some(op);
-            }
-        }
-        let h = prev.unwrap();
-        self.add_unspanned(Expression::Select {
-            condition: h,
-            accept: self.constants.true_bool,
-            reject: result,
-        })
-    }
     pub(crate) fn propagate_nan<const OPERANDS: usize>(
         &mut self,
         ctx: &Compiler,
@@ -244,7 +219,11 @@ impl CompilingFunction {
             };
             NanCheck { is_nan, source }
         });
-        let is_nan = self.operands_true_or([operand_check.is_nan], result_is_nan);
+        let is_nan = self.add_unspanned(Expression::Select {
+            condition: operand_check.is_nan,
+            accept: self.constants.true_bool,
+            reject: result_is_nan,
+        });
         let source = if ctx.config.do_nan_tracking {
             let this_id =
                 self.add_preemit(Expression::Literal(naga::Literal::U32(result_source_id)));

@@ -10,7 +10,7 @@ pub struct StackAlloc {
 }
 
 impl CompilingFunction {
-    pub(crate) fn push_frame(&mut self, ctx: &mut Compiler) {
+    pub(crate) fn push_frame(&mut self) {
         self.frame_size_tallies.push(None);
     }
 

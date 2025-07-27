@@ -198,7 +198,7 @@ impl CompilingFunction {
         });
         func.store(stack_base, heap_offset);
         func.store(stack_head, heap_offset);
-        func.push_frame(ctx);
+        func.push_frame();
         func
     }
 
@@ -379,7 +379,7 @@ impl CompilingFunction {
                 let scalar =
                     self.get_scalar_assignment(ctx, assignment.id, assignment.value.ty.base());
 
-                self.push_frame(ctx);
+                self.push_frame();
                 let value = compile_scalar(ctx, self, &assignment.value);
                 self.pop_frame();
 

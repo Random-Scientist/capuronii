@@ -52,7 +52,7 @@ impl LazyBroadcast<'_> {
             func.in_inner().store(assignment, value);
         }
         let eval_in = func.in_inner();
-        eval_in.push_frame(ctx);
+        eval_in.push_frame();
         let r = compile_scalar(ctx, eval_in, self.body);
         eval_in.pop_frame();
         r.inner
@@ -124,7 +124,7 @@ impl LazyComprehension<'_> {
 
         // frame for listcomp deps
 
-        func.push_frame(ctx);
+        func.push_frame();
         func.bind_assignments(ctx, &self.body.assignments);
         let result = compile_scalar(ctx, func, &self.body.value);
         func.pop_frame();
@@ -544,7 +544,7 @@ impl ListDef<'_> {
                     let components = elements
                         .iter()
                         .map(|e| {
-                            func.push_frame(ctx);
+                            func.push_frame();
                             let r = compile_scalar(ctx, func, e).inner;
                             func.pop_frame();
                             r
@@ -662,7 +662,7 @@ impl ListDef<'_> {
                 let alloc = func.alloc_list(ctx, self.ty, len);
                 let body = func.new_block();
 
-                func.push_frame(ctx);
+                func.push_frame();
                 let this_iter_idx = func.load(iter_index);
 
                 let mut b = WithEvalBlock {

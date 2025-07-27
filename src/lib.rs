@@ -383,7 +383,7 @@ fn compile_scalar(
                 match operation {
                     type_checker::BinaryOperator::IndexPointList
                     | type_checker::BinaryOperator::IndexNumberList => {
-                        func.push_frame(c);
+                        func.push_frame();
                         let rhs = compile_scalar(c, func, right);
                         let lhs_list = collect_list(left);
 
