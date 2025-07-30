@@ -12,6 +12,7 @@ use crate::{
         Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
         Select, StackList, UntypedListDef,
     },
+    math_impl::NumericConfig,
 };
 mod alloc;
 mod function;
@@ -26,23 +27,15 @@ struct CompilerConfig {
     heap_per_invocation: u32,
     /// Map of [`Identifier`](parse::type_checker::Expression::Identifier)s to override with a dynamic GPU value
     io_map: Vec<(usize, GpuInput)>,
-    /// Whether to assume that all numbers produced by the expression are finite.
-    /// This falls back to the WGSL semantics; when an operation would return ±inf
-    /// or NaN under IEEE it is permitted to return an arbitrary value instead.
-    /// This allows us to generate **much** faster code because we don't have to emulate NaN checking in software
-    assume_numbers_finite: bool,
-    /// Whether to "NaN box" and propagate the source expressions of NaNs
-    /// Only affects generated code when [`CompilerConfig::assume_numbers_finite`] is `false`
-    /// Note: may further reduce performance of the generated code for NaN propagation.
-    do_nan_tracking: bool,
+    /// Configurable behavior for numerical operations
+    numeric: NumericConfig,
 }
 impl Default for CompilerConfig {
     fn default() -> Self {
         Self {
             heap_per_invocation: 20000,
             io_map: Vec::new(),
-            do_nan_tracking: false,
-            assume_numbers_finite: false,
+            numeric: Default::default(),
         }
     }
 }
