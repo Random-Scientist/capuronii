@@ -1,4 +1,4 @@
-use naga::{Expression, Handle};
+use naga::{Expression, Handle, MathFunction};
 
 use crate::{Compiler, function::CompilingFunction};
 
@@ -399,6 +399,19 @@ impl CompilingFunction {
             }
         }
     }
+    fn non_nan_unary_fp_op(
+        &mut self,
+        ctx: &Compiler,
+        val: Float32,
+        imp: impl FnOnce(&mut CompilingFunction, Handle<Expression>) -> Handle<Expression>,
+    ) -> Float32 {
+        self.fp_op(
+            ctx,
+            [val],
+            move |func, [val]| imp(func, val),
+            |f, _, _| f.constants.false_bool,
+        )
+    }
     pub(crate) fn add(&mut self, ctx: &Compiler, lhsf: Float32, rhsf: Float32) -> Float32 {
         self.fp_op(
             ctx,
@@ -515,5 +528,112 @@ impl CompilingFunction {
                 }
             },
         )
+    }
+    pub(crate) fn negate(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.fp_op(
+            ctx,
+            [val],
+            |f, [v]| {
+                f.add_unspanned(Expression::Unary {
+                    op: naga::UnaryOperator::Negate,
+                    expr: val.value,
+                })
+            },
+            // negation of a finite value is a finite value
+            |f, _, _| f.constants.false_bool,
+        )
+    }
+    pub(crate) fn sqrt(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.fp_op(
+            ctx,
+            [val],
+            |func, [v]| {
+                func.add_unspanned(Expression::Math {
+                    fun: naga::MathFunction::Sqrt,
+                    arg: v,
+                    arg1: None,
+                    arg2: None,
+                    arg3: None,
+                })
+            },
+            |f, [v], _| {
+                // Sqrt strictly shrinks the magnitude of the operand
+                f.add_unspanned(Expression::Binary {
+                    op: naga::BinaryOperator::Less,
+                    left: v.value,
+                    right: f.constants.zero_f32,
+                })
+            },
+        )
+    }
+    pub(crate) fn ln(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.fp_op(
+            ctx,
+            [val],
+            |func, [v]| {
+                func.add_unspanned(Expression::Math {
+                    fun: naga::MathFunction::Log,
+                    arg: v,
+                    arg1: None,
+                    arg2: None,
+                    arg3: None,
+                })
+            },
+            |f, [v], _| {
+                // ln strictly shrinks the magnitude of the output if positive.
+                // If the operand is less than one, the magnitude may increase
+                // but may not be greater than 15.9 as |ln(f32::EPSILON)| ~= 15.94,
+                // so no magnitude checking is required
+                f.add_unspanned(Expression::Binary {
+                    op: naga::BinaryOperator::LessEqual,
+                    left: v.value,
+                    right: f.constants.zero_f32,
+                })
+            },
+        )
+    }
+    pub(crate) fn exp(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.fp_op(
+            ctx,
+            [val],
+            |func, [val]| {
+                func.add_unspanned(Expression::Math {
+                    fun: naga::MathFunction::Exp,
+                    arg: val,
+                    arg1: None,
+                    arg2: None,
+                    arg3: None,
+                })
+            },
+            |func, [arg], _| {
+                func.add_unspanned(Expression::Binary {
+                    op: naga::BinaryOperator::Greater,
+                    left: arg.value,
+                    right: func.constants.ln_max_f32,
+                })
+            },
+        )
+    }
+    //TODO erf
+    fn nnan_un_math_func(&mut self, ctx: &Compiler, val: Float32, func: MathFunction) -> Float32 {
+        self.non_nan_unary_fp_op(ctx, val, |func, val| {
+            func.add_unspanned(Expression::Math {
+                fun: naga::MathFunction::Sin,
+                arg: val,
+                arg1: None,
+                arg2: None,
+                arg3: None,
+            })
+        })
+    }
+    pub(crate) fn sin(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.nnan_un_math_func(ctx, val, MathFunction::Sin)
+    }
+    pub(crate) fn cos(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.nnan_un_math_func(ctx, val, MathFunction::Cos)
+    }
+    // TODO hyperbolic trig inverse trig
+    pub(crate) fn abs(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
+        self.nnan_un_math_func(ctx, val, MathFunction::Abs)
     }
 }
