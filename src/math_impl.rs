@@ -206,9 +206,9 @@ impl CompilingFunction {
             left: left.value,
             right: right.value,
         });
-        let left = left.get_or_materialize_check(self);
-        let right = right.get_or_materialize_check(self);
         if !ctx.config.numeric.assume_floats_finite() {
+            let left = left.get_or_materialize_check(self);
+            let right = right.get_or_materialize_check(self);
             let nanck = self.add_unspanned(Expression::Binary {
                 op: naga::BinaryOperator::LogicalOr,
                 left,
