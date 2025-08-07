@@ -5,7 +5,9 @@ use parse::type_checker::{self, Assignment, BaseType};
 use replace_with::replace_with_or_abort;
 
 use crate::{
-    ArenaExt, Compiler, ScalarRef, WithScalarType, alloc::StackAlloc, compile_scalar,
+    ArenaExt, Compiler, ScalarValue,
+    alloc::{Alloc, StackAlloc, StaticAlloc},
+    compile_scalar,
     function::CompilingFunction,
 };
 
@@ -40,7 +42,7 @@ impl LazyBroadcast<'_> {
         idx: Handle<naga::Expression>,
         ctx: &mut Compiler,
         func: &mut impl MaybeSwitchBlock,
-    ) -> Handle<naga::Expression> {
+    ) -> ScalarValue {
         let p = func.in_outer();
         p.bind_assignments(ctx, self.scalars);
 
@@ -48,14 +50,15 @@ impl LazyBroadcast<'_> {
         for (id, list) in self.varying {
             let assignment = func.in_inner().get_scalar_assignment(ctx, id, list.ty);
             let value = list.index(idx, ctx, func);
-
-            func.in_inner().store(assignment, value);
+            let inner = func.in_inner();
+            let s = inner.serialize_scalar(ctx, value);
+            inner.store(assignment, s);
         }
         let eval_in = func.in_inner();
         eval_in.push_frame();
         let r = compile_scalar(ctx, eval_in, self.body);
         eval_in.pop_frame();
-        r.inner
+        r
     }
 }
 pub struct LazyComprehension<'a> {
@@ -85,16 +88,16 @@ impl LazyComprehension<'_> {
         idx: Handle<naga::Expression>,
         ctx: &mut Compiler,
         blocks: &mut impl MaybeSwitchBlock,
-    ) -> Handle<naga::Expression> {
+    ) -> ScalarValue {
         let pre = blocks.in_outer();
         let lengths: Vec<_> = self
             .varying
             .iter_mut()
-            .map(|(id, l)| l.compute_len_inner(ctx, pre))
+            .map(|(_, l)| l.compute_len_inner(ctx, pre))
             .collect();
         // Determine and index comprehension varyings
         // TODO make this only update a given varying binding when its index changes
-        let mut prev_section_len = pre.constants.one_u32;
+        let mut prev_section_len = pre.consts.one_u32;
         for ((assignment, value), length) in self.varying.into_iter().zip(lengths) {
             let out_ty = value.ty;
             let func = blocks.in_inner();
@@ -118,7 +121,8 @@ impl LazyComprehension<'_> {
 
             let func = blocks.in_inner();
             let s = func.get_scalar_assignment(ctx, assignment, out_ty);
-            func.store(s, val);
+            let ser = func.serialize_scalar(ctx, val);
+            func.store(s, ser);
         }
         let func = blocks.in_inner();
 
@@ -129,7 +133,7 @@ impl LazyComprehension<'_> {
         let result = compile_scalar(ctx, func, &self.body.value);
         func.pop_frame();
 
-        result.inner
+        result
     }
 }
 
@@ -137,12 +141,6 @@ pub struct LazyStaticList<'a> {
     pub(crate) elements: &'a [type_checker::TypedExpression],
 }
 
-pub struct StaticList {
-    // u32
-    pub(crate) len: Handle<naga::Expression>,
-    // ptr to [u32; len]
-    pub(crate) arr: Handle<naga::Expression>,
-}
 pub struct Join<'a> {
     pub lists: Vec<ListDef<'a>>,
 }
@@ -169,20 +167,20 @@ impl Join<'_> {
         idx: Handle<naga::Expression>,
         ctx: &mut Compiler,
         blocks: &mut impl MaybeSwitchBlock,
-    ) -> Handle<naga::Expression> {
+    ) -> ScalarValue {
         let pre = blocks.in_outer();
-        let mut curr_start_idx = pre.constants.zero_u32;
+        let mut curr_start_idx = pre.consts.zero_u32;
 
         let val_out = pre.new_local(
-            ctx.scalar_type(self.lists.first().unwrap().ty),
+            ctx.scalar_type_repr(self.lists.first().unwrap().ty),
             None,
-            Some(format!("join_output_{}", pre.local_variables.len())),
+            Some(format!("join_output_{}", pre.func.local_variables.len())),
         );
 
         let mut body_block = blocks.in_inner().new_block();
 
         let mut cond_blocks = Vec::with_capacity(self.lists.len());
-
+        let mut ty = None;
         for mut list in self.lists.into_iter().rev() {
             let pre = blocks.in_outer();
             let this_len = list.compute_len_inner(ctx, pre);
@@ -202,8 +200,11 @@ impl Join<'_> {
             });
 
             let val = list.index(transformed_idx, ctx, blocks);
+            ty = Some(val.ty());
             let func = blocks.in_inner();
-            func.store(val_out, val);
+
+            let ser = func.serialize_scalar(ctx, val);
+            func.store(val_out, ser);
 
             let success_block = func.new_block();
 
@@ -232,10 +233,12 @@ impl Join<'_> {
         let func = blocks.in_inner();
 
         func.swap_block(&mut body_block);
-        func.body
+        func.func
+            .body
             .push(naga::Statement::Block(nested_if), naga::Span::UNDEFINED);
 
-        func.load(val_out)
+        let l = func.load(val_out);
+        func.deserialize_scalar(ctx, l, ty.unwrap())
     }
 }
 pub struct Filter<'a> {
@@ -281,7 +284,7 @@ impl Filter<'_> {
 
         let func = other.in_inner();
 
-        func.store_to_top_of_stack_typed(ctx, ScalarRef::new(out_ty, result));
+        func.store_to_top_of_stack_typed(ctx, result);
 
         let current_out_len = func.load(out_len);
 
@@ -296,14 +299,11 @@ impl Filter<'_> {
 
         func.swap_block(&mut loop_block);
         let success_case = loop_block;
-        func.body.push(
-            naga::Statement::If {
-                condition: test,
-                accept: success_case,
-                reject: Block::new(),
-            },
-            naga::Span::UNDEFINED,
-        );
+        func.push_statement(naga::Statement::If {
+            condition: test.expect_bool(),
+            accept: success_case,
+            reject: Block::new(),
+        });
         let next_iter_index = func.increment(this_iter_index);
 
         let should_break = func.add_unspanned(naga::Expression::Binary {
@@ -312,14 +312,11 @@ impl Filter<'_> {
             right: max_len,
         });
         func.emit_exprs();
-        func.body.push(
-            naga::Statement::If {
-                condition: should_break,
-                accept: Block::from_vec(vec![naga::Statement::Break]),
-                reject: Block::new(),
-            },
-            naga::Span::UNDEFINED,
-        );
+        func.push_statement(naga::Statement::If {
+            condition: should_break,
+            accept: Block::from_vec(vec![naga::Statement::Break]),
+            reject: Block::new(),
+        });
         func.store(iter_index, next_iter_index);
         // ensure func contains the primary body block, not the loop body block
         let _ = other.in_outer();
@@ -327,20 +324,20 @@ impl Filter<'_> {
             other: body, func, ..
         } = other;
 
-        func.body.push(
-            naga::Statement::Loop {
-                body,
-                continuing: Block::new(),
-                break_if: None,
-            },
-            naga::Span::UNDEFINED,
-        );
+        func.push_statement(naga::Statement::Loop {
+            body,
+            continuing: Block::new(),
+            break_if: None,
+        });
         let len = func.load(out_len);
 
-        MaterializedList::Temporary(StackAlloc {
-            base_addr: out_base_addr,
-            len,
-        })
+        MaterializedList::Allocated(
+            StackAlloc {
+                base_addr: out_base_addr,
+                size: len,
+            }
+            .into(),
+        )
     }
 }
 
@@ -374,8 +371,7 @@ impl<'a> ListDef<'a> {
     }
 }
 pub enum MaterializedList {
-    Temporary(StackAlloc),
-    Static(StaticList),
+    Allocated(Alloc),
     Empty,
 }
 
@@ -385,20 +381,10 @@ pub(crate) trait MaybeSwitchBlock: Sized {
         // default implementation does eval and prelude in the same block
         self.in_outer()
     }
-    fn into_inner<'a>(self) -> (&'a mut CompilingFunction, Option<Block>)
-    where
-        Self: 'a;
 }
 impl MaybeSwitchBlock for &'_ mut CompilingFunction {
     fn in_outer(&mut self) -> &mut CompilingFunction {
         self
-    }
-
-    fn into_inner<'a>(self) -> (&'a mut CompilingFunction, Option<Block>)
-    where
-        Self: 'a,
-    {
-        (self, None)
     }
 }
 
@@ -422,14 +408,6 @@ impl MaybeSwitchBlock for WithEvalBlock<'_> {
         }
         self.func
     }
-
-    fn into_inner<'a>(mut self) -> (&'a mut CompilingFunction, Option<Block>)
-    where
-        Self: 'a,
-    {
-        self.in_outer();
-        (self.func, Some(self.other))
-    }
 }
 
 impl ListDef<'_> {
@@ -450,14 +428,8 @@ impl ListDef<'_> {
         }
         let len = match &mut self.inner {
             UntypedListDef::Materialized(materialized_list) => match materialized_list {
-                MaterializedList::Temporary(stack_alloc) => {
-                    func.compute_stack_list_len(&WithScalarType {
-                        ty: self.ty,
-                        inner: *stack_alloc,
-                    })
-                }
-                MaterializedList::Static(static_list) => static_list.len,
-                MaterializedList::Empty => func.constants.zero_u32,
+                MaterializedList::Allocated(alloc) => func.len_from_size(*alloc, self.ty),
+                MaterializedList::Empty => func.consts.zero_u32,
             },
             UntypedListDef::Broadcast(lazy_broadcast) => lazy_broadcast.compute_len(ctx, func),
             UntypedListDef::Comprehension(lazy_comprehension) => {
@@ -480,7 +452,7 @@ impl ListDef<'_> {
             }
             UntypedListDef::Select(select) => {
                 let test = *self.cached_select_test.get_or_insert_with(|| {
-                    let i = compile_scalar(ctx, func, select.test).inner;
+                    let i = compile_scalar(ctx, func, select.test).expect_bool();
                     func.emit_exprs();
                     i
                 });
@@ -495,15 +467,12 @@ impl ListDef<'_> {
                 func.store(result, alternate_len);
 
                 let alternate = func.new_block();
-                func.body = outer;
-                func.body.push(
-                    Statement::If {
-                        condition: test,
-                        accept: consequent,
-                        reject: alternate,
-                    },
-                    naga::Span::UNDEFINED,
-                );
+                func.func.body = outer;
+                func.push_statement(Statement::If {
+                    condition: test,
+                    accept: consequent,
+                    reject: alternate,
+                });
                 func.load(result)
             }
         };
@@ -515,7 +484,7 @@ impl ListDef<'_> {
         idx: Handle<naga::Expression>,
         ctx: &mut Compiler,
         blocks: &mut impl MaybeSwitchBlock,
-    ) -> Handle<naga::Expression> {
+    ) -> ScalarValue {
         match self.inner {
             UntypedListDef::Materialized(materialized_list) => {
                 materialized_list.index(ctx, blocks.in_inner(), self.ty, idx)
@@ -529,35 +498,39 @@ impl ListDef<'_> {
                 self.inner = if elements.is_empty() {
                     UntypedListDef::Materialized(MaterializedList::Empty)
                 } else {
+                    let size =
+                        elements.len() as u32 * blocks.in_outer().comptime_size_of_scalar(self.ty);
                     // materialize static lists into the prelude scope
                     let func = blocks.in_outer();
                     let new_arr_ty = ctx.module.types.add_unspanned(naga::Type {
                         name: None,
                         inner: naga::TypeInner::Array {
-                            base: ctx.scalar_type(self.ty),
-                            size: naga::ArraySize::Constant(
-                                NonZeroU32::new(elements.len() as u32).unwrap(),
-                            ),
+                            base: ctx.types.u32,
+                            size: naga::ArraySize::Constant(NonZeroU32::new(size).unwrap()),
                             stride: 4,
                         },
                     });
                     let components = elements
                         .iter()
-                        .map(|e| {
+                        .flat_map(|e| {
                             func.push_frame();
-                            let r = compile_scalar(ctx, func, e).inner;
+                            let r = compile_scalar(ctx, func, e);
                             func.pop_frame();
-                            r
+                            func.get_boxed_bits(ctx, r)
                         })
                         .collect();
                     let arr = func.add_unspanned(naga::Expression::Compose {
                         ty: new_arr_ty,
                         components,
                     });
-                    let len = func.add_preemit(naga::Expression::Literal(naga::Literal::U32(
-                        elements.len() as u32,
-                    )));
-                    UntypedListDef::Materialized(MaterializedList::Static(StaticList { len, arr }))
+                    let loc = func.new_local(new_arr_ty, Some(arr), None);
+
+                    UntypedListDef::Materialized(MaterializedList::Allocated(Alloc::Static(
+                        StaticAlloc {
+                            array_pointer: loc,
+                            size,
+                        },
+                    )))
                 };
                 self.index(idx, ctx, blocks)
             }
@@ -569,9 +542,10 @@ impl ListDef<'_> {
             }
             UntypedListDef::Select(select) => {
                 let test = *self.cached_select_test.get_or_insert_with(|| {
-                    let i = compile_scalar(ctx, blocks.in_outer(), select.test).inner;
-                    blocks.in_outer().emit_exprs();
-                    i
+                    let out = blocks.in_outer();
+                    let i = compile_scalar(ctx, out, select.test);
+                    out.emit_exprs();
+                    i.expect_bool()
                 });
                 let index_result =
                     blocks
@@ -592,9 +566,10 @@ impl ListDef<'_> {
                         .consequent_alternate
                         .0
                         .index(idx, ctx, &mut blocks_consequent);
-                blocks_consequent
+                let ser = blocks_consequent
                     .in_inner()
-                    .store(index_result, indexed_consequent);
+                    .serialize_scalar(ctx, indexed_consequent);
+                blocks_consequent.in_inner().store(index_result, ser);
                 let WithEvalBlock {
                     other: consequent_outer,
                     func,
@@ -612,9 +587,10 @@ impl ListDef<'_> {
                         .consequent_alternate
                         .1
                         .index(idx, ctx, &mut blocks_alternate);
-                blocks_alternate
+                let ser = blocks_alternate
                     .in_inner()
-                    .store(index_result, indexed_alternate);
+                    .serialize_scalar(ctx, indexed_alternate);
+                blocks_alternate.in_inner().store(index_result, ser);
                 let WithEvalBlock {
                     other: alternate_outer,
                     func,
@@ -622,27 +598,23 @@ impl ListDef<'_> {
                 } = blocks_alternate;
                 let alternate_inner = func.new_block();
                 // back to surrounding block
-                func.body = outer;
+                func.func.body = outer;
                 // empty block has no side effects by definition
                 if !(consequent_outer.is_empty() && alternate_outer.is_empty()) {
-                    func.body.push(
-                        Statement::If {
-                            condition: test,
-                            accept: consequent_outer,
-                            reject: alternate_outer,
-                        },
-                        naga::Span::UNDEFINED,
-                    );
-                }
-                blocks.in_inner().body.push(
-                    Statement::If {
+                    func.push_statement(Statement::If {
                         condition: test,
-                        accept: consequent_inner,
-                        reject: alternate_inner,
-                    },
-                    naga::Span::UNDEFINED,
-                );
-                blocks.in_inner().load(index_result)
+                        accept: consequent_outer,
+                        reject: alternate_outer,
+                    });
+                }
+                blocks.in_inner().push_statement(Statement::If {
+                    condition: test,
+                    accept: consequent_inner,
+                    reject: alternate_inner,
+                });
+                let inner = blocks.in_inner();
+                let l = inner.load(index_result);
+                inner.deserialize_scalar(ctx, l, self.ty)
             }
         }
     }
@@ -658,12 +630,19 @@ impl ListDef<'_> {
             _ => {
                 let out_ty = self.ty;
                 let len = self.compute_len_inner(ctx, func);
-                let iter_index = func.new_local_index(ctx);
-                let alloc = func.alloc_list(ctx, self.ty, len);
+                let iter_ofs = func.new_local_index(ctx);
+                let ss = func.size_of_scalar(out_ty);
+                let alloc_size = func.add_preemit(naga::Expression::Binary {
+                    op: naga::BinaryOperator::Multiply,
+                    left: len,
+                    right: ss,
+                });
+                let alloc = func.alloc_stack(ctx, alloc_size);
+
                 let body = func.new_block();
 
                 func.push_frame();
-                let this_iter_idx = func.load(iter_index);
+                let this_iter_ofs = func.load(iter_ofs);
 
                 let mut b = WithEvalBlock {
                     other: body,
@@ -671,43 +650,41 @@ impl ListDef<'_> {
                     in_eval: true,
                 };
 
-                let val = self.index(this_iter_idx, ctx, &mut b);
+                let val = self.index(this_iter_ofs, ctx, &mut b);
                 let func = b.in_inner();
 
-                func.store_index_list_typed(&alloc, this_iter_idx, ScalarRef::new(out_ty, val));
-                let next_idx = func.increment(this_iter_idx);
+                func.store_to_alloc_typed(ctx, alloc, this_iter_ofs, val);
+                let next_ofs = func.add_unspanned(naga::Expression::Binary {
+                    op: naga::BinaryOperator::Add,
+                    left: this_iter_ofs,
+                    right: ss,
+                });
 
                 let should_break = func.add_unspanned(naga::Expression::Binary {
                     op: naga::BinaryOperator::GreaterEqual,
-                    left: next_idx,
-                    right: len,
+                    left: next_ofs,
+                    right: alloc_size,
                 });
                 // barrier
                 func.emit_exprs();
 
-                func.body.push(
-                    Statement::If {
-                        condition: should_break,
-                        accept: Block::from_vec(vec![Statement::Break]),
-                        reject: Block::new(),
-                    },
-                    naga::Span::UNDEFINED,
-                );
+                func.push_statement(Statement::If {
+                    condition: should_break,
+                    accept: Block::from_vec(vec![Statement::Break]),
+                    reject: Block::new(),
+                });
                 func.pop_frame();
                 let _ = b.in_outer();
                 let WithEvalBlock {
                     other: body, func, ..
                 } = b;
-                func.body.push(
-                    naga::Statement::Loop {
-                        body,
-                        continuing: Block::default(),
-                        break_if: None,
-                    },
-                    naga::Span::UNDEFINED,
-                );
+                func.push_statement(naga::Statement::Loop {
+                    body,
+                    continuing: Block::default(),
+                    break_if: None,
+                });
 
-                MaterializedList::Temporary(alloc.inner)
+                MaterializedList::Allocated(alloc)
             }
         }
     }
@@ -719,22 +696,15 @@ impl MaterializedList {
         func: &mut CompilingFunction,
         ty: BaseType,
         index: Handle<naga::Expression>,
-    ) -> Handle<naga::Expression> {
+    ) -> ScalarValue {
         match self {
-            MaterializedList::Temporary(stack_alloc) => {
-                let raw = func.index_to_raw(index, ty);
-                let addr = func.index_alloc_to_addr(stack_alloc, raw);
-                func.load_stack_typed(ctx, addr, ty).inner
+            MaterializedList::Allocated(stack_alloc) => {
+                let offset = func.index_to_raw(index, ty);
+                func.load_from_alloc_typed(ctx, *stack_alloc, offset, ty)
             }
-            MaterializedList::Static(static_list) => func.add_unspanned(naga::Expression::Access {
-                base: static_list.arr,
-                index,
-            }),
+
             //TODO when GPU panics are implemented this should be one
-            MaterializedList::Empty => {
-                func.add_preemit(naga::Expression::ZeroValue(ctx.scalar_type(ty)))
-            }
+            MaterializedList::Empty => func.zeroed(ty),
         }
     }
 }
-pub type StackList = WithScalarType<StackAlloc>;

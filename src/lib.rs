@@ -1,34 +1,77 @@
 use naga::{
-    AddressSpace, Arena, GlobalVariable, Handle, MathFunction, Module, ResourceBinding,
-    StorageAccess, UniqueArena,
+    AddressSpace, Arena, GlobalVariable, Handle, Module, ResourceBinding, StorageAccess,
+    UniqueArena,
 };
 use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
-use std::collections::HashMap;
+use std::{collections::HashMap, mem::MaybeUninit};
 use typed_index_collections::{TiVec, ti_vec};
 
 use crate::{
     function::CompilingFunction,
     listdef::{
         Filter, Join, LazyBroadcast, LazyComprehension, LazyStaticList, ListDef, MaterializedList,
-        Select, StackList, UntypedListDef,
+        Select, UntypedListDef,
     },
-    math_impl::NumericConfig,
+    math_impl::{Float32, NumericConfig},
 };
+
 mod alloc;
 mod function;
 mod listdef;
 mod math_impl;
 mod symath;
+
 #[cfg(test)]
 mod test;
 
-struct CompilerConfig {
+pub(crate) const POINT_SIZE: u32 = 2;
+#[derive(Debug, Clone, Copy)]
+pub enum ScalarValue {
+    Number(Float32),
+    Point([Float32; POINT_SIZE as usize]),
+    Bool(Handle<naga::Expression>),
+}
+impl ScalarValue {
+    fn ty(&self) -> BaseType {
+        match self {
+            ScalarValue::Number(_) => BaseType::Number,
+            ScalarValue::Point(_) => BaseType::Point,
+            ScalarValue::Bool(_) => BaseType::Bool,
+        }
+    }
+    fn expect_number(self) -> Float32 {
+        match self {
+            ScalarValue::Number(n) => n,
+            ScalarValue::Point(_) | ScalarValue::Bool(_) => {
+                panic!("expected a number, got a point or bool")
+            }
+        }
+    }
+    fn expect_point(self) -> [Float32; POINT_SIZE as usize] {
+        match self {
+            ScalarValue::Number(_) | ScalarValue::Bool(_) => {
+                panic!("expected a point, got a number or bool")
+            }
+            ScalarValue::Point(p) => p,
+        }
+    }
+    fn expect_bool(self) -> Handle<naga::Expression> {
+        match self {
+            ScalarValue::Number(_) | ScalarValue::Point(_) => {
+                panic!("expected a bool, got a number or point")
+            }
+            ScalarValue::Bool(h) => h,
+        }
+    }
+}
+
+pub struct CompilerConfig {
     /// Maximum size of the arena allocated for each invocation in intervals of 4 bytes (e.g. setting this value to 10 implies a >=40 byte long backing heap buffer)
-    heap_per_invocation: u32,
+    pub heap_per_invocation: u32,
     /// Map of [`Identifier`](parse::type_checker::Expression::Identifier)s to override with a dynamic GPU value
-    io_map: Vec<(usize, GpuInput)>,
+    pub io_map: Vec<(usize, GpuInput)>,
     /// Configurable behavior for numerical operations
-    numeric: NumericConfig,
+    pub numeric: NumericConfig,
 }
 impl Default for CompilerConfig {
     fn default() -> Self {
@@ -43,7 +86,7 @@ impl Default for CompilerConfig {
 struct TyContext {
     u32: Handle<naga::Type>,
     f32: Handle<naga::Type>,
-    point: Handle<naga::Type>,
+    point_repr: Handle<naga::Type>,
     bool: Handle<naga::Type>,
     uvec3: Handle<naga::Type>,
 }
@@ -86,11 +129,12 @@ impl Compiler {
                 name: "f32".to_string().into(),
                 inner: naga::TypeInner::Scalar(naga::Scalar::F32),
             }),
-            point: module.types.add_unspanned(naga::Type {
-                name: "vec2".to_string().into(),
+            point_repr: module.types.add_unspanned(naga::Type {
+                name: "uvec2".to_string().into(),
                 inner: naga::TypeInner::Vector {
                     size: naga::VectorSize::Bi,
-                    scalar: naga::Scalar::F32,
+                    // must be able to represent NaN
+                    scalar: naga::Scalar::U32,
                 },
             }),
             bool: module.types.add_unspanned(naga::Type {
@@ -182,10 +226,19 @@ impl Compiler {
     fn scalar_type(&self, scalar: BaseType) -> Handle<naga::Type> {
         match scalar {
             BaseType::Number => self.types.f32,
-            BaseType::Point => self.types.point,
+            BaseType::Point => self.types.point_repr,
             BaseType::Bool => self.types.bool,
             BaseType::Empty => panic!("invalid scalar type Empty"),
             BaseType::Polygon => todo!(),
+        }
+    }
+    fn scalar_type_repr(&self, scalar: BaseType) -> Handle<naga::Type> {
+        match scalar {
+            BaseType::Number => self.types.u32,
+            BaseType::Point => self.types.point_repr,
+            BaseType::Polygon => todo!(),
+            BaseType::Bool => todo!(),
+            BaseType::Empty => todo!(),
         }
     }
     fn bind_list_assignment(&mut self, id: usize, list: MaterializedList) {
@@ -206,10 +259,7 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
             base,
             listdef::UntypedListDef::LazyStatic(listdef::LazyStaticList { elements }),
         ),
-        type_checker::Expression::ListRange {
-            before_ellipsis,
-            after_ellipsis,
-        } => todo!(),
+        type_checker::Expression::ListRange { .. } => todo!(),
         type_checker::Expression::Broadcast {
             scalars,
             vectors,
@@ -257,13 +307,7 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
                 consequent_alternate: Box::new((collect_list(consequent), collect_list(alternate))),
             }),
         ),
-        type_checker::Expression::SumProd {
-            kind,
-            variable,
-            lower_bound,
-            upper_bound,
-            body,
-        } => todo!(),
+        type_checker::Expression::SumProd { .. } => todo!(),
         type_checker::Expression::For { body, lists } => ListDef::new(
             expr.ty.base(),
             UntypedListDef::Comprehension(LazyComprehension {
@@ -316,56 +360,44 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
 }
 
 fn compile_scalar(
-    c: &mut Compiler,
-    mut func: &mut CompilingFunction,
+    ctx: &mut Compiler,
+    func: &mut CompilingFunction,
     expr: &TypedExpression,
-) -> ScalarRef {
-    let e = match &expr.e {
-        type_checker::Expression::Number(v) => {
-            naga::Expression::Literal(naga::Literal::F32(*v as f32))
-        }
+) -> ScalarValue {
+    match &expr.e {
+        type_checker::Expression::Number(v) => func.new_literal(*v as f32),
         type_checker::Expression::Identifier(i) => {
-            if let Assignment::Scalar(s) = c.assignments.get(i).unwrap() {
-                return ScalarRef::new(expr.ty.base(), func.load(*s));
-            } else {
-                panic!()
-            }
+            assert!(!expr.ty.is_list());
+            let ty = expr.ty.base();
+            let assignment = func.get_scalar_assignment(ctx, *i, ty);
+            let ser = func.load(assignment);
+            func.deserialize_scalar(ctx, ser, ty)
         }
-        type_checker::Expression::List(typed_expressions) => todo!(),
-        type_checker::Expression::ListRange {
-            before_ellipsis,
-            after_ellipsis,
-        } => todo!(),
-        type_checker::Expression::Broadcast {
-            scalars,
-            vectors,
-            body,
-        } => todo!(),
         type_checker::Expression::UnaryOperation { operation, arg } => {
-            let arg = compile_scalar(c, func, arg).inner;
-            let un_math = |fun| naga::Expression::Math {
-                fun,
-                arg,
-                arg1: None,
-                arg2: None,
-                arg3: None,
-            };
-            let un_op = |op| naga::Expression::Unary { op, expr: arg };
-            let swiz = |i: u8| naga::Expression::AccessIndex {
-                base: arg,
-                index: i as u32,
-            };
-            match operation {
-                type_checker::UnaryOperator::NegNumber | type_checker::UnaryOperator::NegPoint => {
-                    un_op(naga::UnaryOperator::Negate)
-                }
-                type_checker::UnaryOperator::Fac => todo!(),
-                type_checker::UnaryOperator::Sqrt => un_math(MathFunction::Sqrt),
-                type_checker::UnaryOperator::Abs => un_math(MathFunction::Abs),
-                type_checker::UnaryOperator::Mag => un_math(MathFunction::Length),
-                type_checker::UnaryOperator::PointX => swiz(0),
-                type_checker::UnaryOperator::PointY => swiz(1),
+            let arg = compile_scalar(ctx, func, arg);
+            'number: {
+                return ScalarValue::Number(match operation {
+                    type_checker::UnaryOperator::NegNumber => func.negate(ctx, arg.expect_number()),
+                    type_checker::UnaryOperator::Fac => todo!(),
+                    type_checker::UnaryOperator::Sqrt => func.sqrt(ctx, arg.expect_number()),
+                    type_checker::UnaryOperator::Abs => func.abs(ctx, arg.expect_number()),
+                    type_checker::UnaryOperator::PointX => arg.expect_point()[0],
+                    type_checker::UnaryOperator::PointY => arg.expect_point()[1],
+                    type_checker::UnaryOperator::Mag => arg
+                        .expect_point()
+                        .map(|coord| func.mul(ctx, coord, coord))
+                        .into_iter()
+                        .fold_on(|r, l| func.add(ctx, r, l))
+                        .expect("point length may not be zero"),
+                    _ => break 'number,
+                });
             }
+            ScalarValue::Point(match operation {
+                type_checker::UnaryOperator::NegPoint => {
+                    arg.expect_point().map(|coord| func.negate(ctx, coord))
+                }
+                _ => unreachable!(),
+            })
         }
         type_checker::Expression::BinaryOperation {
             operation,
@@ -374,97 +406,97 @@ fn compile_scalar(
         } => {
             if left.ty.is_list() {
                 match operation {
-                    type_checker::BinaryOperator::IndexPointList
-                    | type_checker::BinaryOperator::IndexNumberList => {
-                        func.push_frame();
-                        let rhs = compile_scalar(c, func, right);
-                        let lhs_list = collect_list(left);
-
-                        let idx = func.make_index(rhs.inner);
-                        let val = lhs_list.index(idx, c, &mut func);
-                        func.pop_frame();
-                        return WithScalarType::new(left.ty.base(), val);
-                    }
+                    type_checker::BinaryOperator::IndexNumberList => todo!(),
+                    type_checker::BinaryOperator::IndexPointList => todo!(),
+                    type_checker::BinaryOperator::IndexPolygonList => todo!(),
+                    type_checker::BinaryOperator::FilterNumberList => todo!(),
+                    type_checker::BinaryOperator::FilterPointList => todo!(),
+                    type_checker::BinaryOperator::FilterPolygonList => todo!(),
                     _ => unreachable!(),
                 }
             } else {
                 let (left, right) = (
-                    compile_scalar(c, func, left).inner,
-                    compile_scalar(c, func, right).inner,
+                    compile_scalar(ctx, func, left),
+                    compile_scalar(ctx, func, right),
                 );
-                let bin_op = |op| naga::Expression::Binary { op, left, right };
-                let bin_math = |fun| naga::Expression::Math {
-                    fun,
-                    arg: left,
-                    arg1: Some(right),
-                    arg2: None,
-                    arg3: None,
-                };
-                match operation {
-                    type_checker::BinaryOperator::AddPoint
-                    | type_checker::BinaryOperator::AddNumber => bin_op(naga::BinaryOperator::Add),
-                    type_checker::BinaryOperator::SubNumber
-                    | type_checker::BinaryOperator::SubPoint => {
-                        bin_op(naga::BinaryOperator::Subtract)
-                    }
-                    type_checker::BinaryOperator::MulNumber
-                    | type_checker::BinaryOperator::MulPointNumber
-                    | type_checker::BinaryOperator::MulNumberPoint => {
-                        bin_op(naga::BinaryOperator::Multiply)
-                    }
-                    type_checker::BinaryOperator::DivPointNumber
-                    | type_checker::BinaryOperator::DivNumber => {
-                        bin_op(naga::BinaryOperator::Divide)
-                    }
+                ScalarValue::Point('point: {
+                    return ScalarValue::Number(match operation {
+                        type_checker::BinaryOperator::AddNumber => {
+                            func.add(ctx, left.expect_number(), right.expect_number())
+                        }
+                        type_checker::BinaryOperator::AddPoint => {
+                            break 'point array_zip(
+                                [left.expect_point(), right.expect_point()],
+                                |[lc, rc]| func.add(ctx, lc, rc),
+                            );
+                        }
+                        type_checker::BinaryOperator::SubNumber => {
+                            func.sub(ctx, left.expect_number(), right.expect_number())
+                        }
+                        type_checker::BinaryOperator::SubPoint => {
+                            break 'point array_zip(
+                                [left.expect_point(), right.expect_point()],
+                                |[lc, rc]| func.sub(ctx, lc, rc),
+                            );
+                        }
+                        type_checker::BinaryOperator::MulNumber => {
+                            func.mul(ctx, left.expect_number(), right.expect_number())
+                        }
+                        type_checker::BinaryOperator::MulPointNumber => {
+                            break 'point array_zip(
+                                [
+                                    left.expect_point(),
+                                    std::array::from_fn(|_| right.expect_number()),
+                                ],
+                                |[lc, rc]| func.mul(ctx, lc, rc),
+                            );
+                        }
+                        type_checker::BinaryOperator::MulNumberPoint => todo!(),
+                        type_checker::BinaryOperator::DivNumber => {
+                            func.div(ctx, left.expect_number(), right.expect_number())
+                        }
+                        type_checker::BinaryOperator::DivPointNumber => {
+                            break 'point array_zip(
+                                [
+                                    left.expect_point(),
+                                    std::array::from_fn(|_| right.expect_number()),
+                                ],
+                                |[lc, rc]| func.div(ctx, lc, rc),
+                            );
+                        }
+                        type_checker::BinaryOperator::Pow => todo!(),
+                        type_checker::BinaryOperator::Dot => todo!(),
 
-                    type_checker::BinaryOperator::Pow => bin_math(MathFunction::Pow),
-                    type_checker::BinaryOperator::Dot => bin_math(MathFunction::Dot),
-                    type_checker::BinaryOperator::Point => naga::Expression::Compose {
-                        ty: c.types.point,
-                        components: vec![left, right],
-                    },
-                    _ => unreachable!(),
-                }
+                        type_checker::BinaryOperator::Point => {
+                            break 'point [left.expect_number(), right.expect_number()];
+                        }
+                        _ => unreachable!(),
+                    });
+                })
             }
         }
         type_checker::Expression::ChainedComparison {
             operands,
             operators,
         } => {
-            let mut initial = compile_scalar(c, func, &operands[0]).inner;
+            let mut initial = compile_scalar(ctx, func, &operands[0]).expect_number();
             let mut expr = None;
             for (operand, operator) in operands[1..].iter().zip(operators) {
-                let current = compile_scalar(c, func, operand).inner;
+                let current = compile_scalar(ctx, func, operand).expect_number();
 
-                let cond = naga::Expression::Binary {
-                    op: match operator {
-                        type_checker::ComparisonOperator::Equal => naga::BinaryOperator::Equal,
-                        type_checker::ComparisonOperator::Less => naga::BinaryOperator::Less,
-                        type_checker::ComparisonOperator::LessEqual => {
-                            naga::BinaryOperator::LessEqual
-                        }
-                        type_checker::ComparisonOperator::Greater => naga::BinaryOperator::Greater,
-                        type_checker::ComparisonOperator::GreaterEqual => {
-                            naga::BinaryOperator::GreaterEqual
-                        }
-                    },
-                    left: initial,
-                    right: current,
-                };
+                let cond = func.cmp(ctx, *operator, initial, current);
                 initial = current;
                 if let Some(to_or) = expr {
-                    let to_or = func.add_unspanned(to_or);
-                    let cond = func.add_unspanned(cond);
-                    expr = Some(naga::Expression::Binary {
+                    expr = Some(func.add_unspanned(naga::Expression::Binary {
                         op: naga::BinaryOperator::LogicalOr,
                         left: to_or,
                         right: cond,
-                    });
+                    }));
                 } else {
                     expr = Some(cond);
                 }
             }
-            expr.expect("invalid comparison")
+            ScalarValue::Bool(expr.expect("invalid comparison"))
         }
         type_checker::Expression::Piecewise {
             test,
@@ -472,20 +504,20 @@ fn compile_scalar(
             alternate,
         } => {
             let [condition, accept, reject] =
-                [test, consequent, alternate].map(|a| compile_scalar(c, func, a).inner);
-            naga::Expression::Select {
-                condition,
+                [test, consequent, alternate].map(|a| compile_scalar(ctx, func, a));
+            let ty = accept.ty();
+            assert!(ty == reject.ty(), "divergent piecewise return type");
+
+            let accept = func.serialize_scalar(ctx, accept);
+            let reject = func.serialize_scalar(ctx, reject);
+            let s = func.add_unspanned(naga::Expression::Select {
+                condition: condition.expect_bool(),
                 accept,
                 reject,
-            }
+            });
+            func.deserialize_scalar(ctx, s, ty)
         }
-        type_checker::Expression::SumProd {
-            kind,
-            variable,
-            lower_bound,
-            upper_bound,
-            body,
-        } => todo!(),
+        type_checker::Expression::SumProd { .. } => todo!(),
         type_checker::Expression::BuiltIn { name, args } => match name {
             BuiltIn::Ln => todo!(),
             BuiltIn::Exp => todo!(),
@@ -531,9 +563,9 @@ fn compile_scalar(
             BuiltIn::MeanNumber => todo!(),
             BuiltIn::MeanPoint => todo!(),
             BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
-                let l = collect_list(expr);
-                let l = l.compute_len(c, func);
-                return WithScalarType::new(BaseType::Number, func.u32_to_float(l));
+                let l = collect_list(&args[0]);
+                let len = l.compute_len(ctx, func);
+                ScalarValue::Number(Float32::new_assume_finite(func.u32_to_float(len)))
             }
             BuiltIn::UniqueNumber => todo!(),
             BuiltIn::UniquePoint => todo!(),
@@ -547,31 +579,12 @@ fn compile_scalar(
             BuiltIn::JoinPoint => todo!(),
             BuiltIn::JoinPolygon => todo!(),
         },
-        _ => unreachable!(),
-    };
-    let h = if e.needs_pre_emit() {
-        func.add_preemit(e)
-    } else {
-        func.add_unspanned(e)
-    };
-    ScalarRef::new(expr.ty.base(), h)
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct WithScalarType<T> {
-    ty: BaseType,
-    inner: T,
-}
-impl<T> WithScalarType<T> {
-    pub fn new(ty: BaseType, inner: T) -> Self {
-        Self { ty, inner }
-    }
-    pub fn types_eq<U>(&self, other: &WithScalarType<U>) -> bool {
-        self.ty == other.ty
+        type_checker::Expression::List(_)
+        | type_checker::Expression::ListRange { .. }
+        | type_checker::Expression::For { .. }
+        | type_checker::Expression::Broadcast { .. } => unreachable!(),
     }
 }
-
-pub(crate) type ScalarRef = WithScalarType<Handle<naga::Expression>>;
 
 enum Assignment {
     Scalar(Handle<naga::Expression>),
@@ -590,4 +603,38 @@ impl<T> ArenaExt<T> for Arena<T> {
     fn add_unspanned(&mut self, val: T) -> Handle<T> {
         self.append(val, naga::Span::UNDEFINED)
     }
+}
+
+impl<T, U: Iterator<Item = T>> IteratorExt<T> for U {}
+trait IteratorExt<T>: Iterator<Item = T> + Sized {
+    fn fold_on(mut self, func: impl FnMut(T, T) -> T) -> Option<T> {
+        let s = self.next()?;
+        Some(self.fold(s, func))
+    }
+}
+/// Zip two const arrays of the same length. Likely explodes the stack for large array sizes, so don't do that
+fn array_zip<const L: usize, const N: usize, T: Copy>(
+    arrs: [[T; L]; N],
+    mut f: impl FnMut([T; N]) -> T,
+) -> [T; L] {
+    let mut out = [const { MaybeUninit::<T>::uninit() }; L];
+    for idx in 0..L {
+        let val = f(arrs.map(|v| v[idx]));
+        out[idx] = MaybeUninit::new(val);
+    }
+    // Safety: all fields are init after iteration
+    unsafe { transmute_unchecked(out) }
+}
+pub(crate) const unsafe fn transmute_unchecked<Src, Dst>(value: Src) -> Dst {
+    union Transmute<Src, Dst> {
+        src: ::core::mem::ManuallyDrop<Src>,
+        dst: ::core::mem::ManuallyDrop<Dst>,
+    }
+    // Safety: caller
+    ::core::mem::ManuallyDrop::into_inner(unsafe {
+        Transmute {
+            src: ::core::mem::ManuallyDrop::new(value),
+        }
+        .dst
+    })
 }

@@ -46,7 +46,7 @@ fn test_main() {
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let upload_staging = device.create_buffer(&BufferDescriptor {
+    let _upload_staging = device.create_buffer(&BufferDescriptor {
         label: Some("upload staging buffer"),
         size: 10000 * 4,
         usage: BufferUsages::COPY_SRC | BufferUsages::MAP_WRITE,
@@ -120,8 +120,8 @@ fn test_main() {
     let test_case = |src: &str| -> Vec<f32> {
         let tex = latex_parser::parse_latex(src).unwrap();
         let expr = parse_expression_list_entry(&tex).unwrap();
-        let (a, b) = resolve_names(&ti_vec![expr]);
-        let (checked, map) = type_check(&a);
+        let (a, _) = resolve_names(&ti_vec![expr]);
+        let (checked, _) = type_check(&a);
         let expr = &checked.first().unwrap().value;
         let module = compile(expr);
         dbg!(&checked);

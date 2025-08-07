@@ -13,8 +13,8 @@ fn test_to_mtl() {
     let tex = r"\{1>2:[1,2,3], a \operatorname{for} a = [1,2,3] \}[1]";
     let tex = latex_parser::parse_latex(tex).unwrap();
     let expr = parse_expression_list_entry(&tex).unwrap();
-    let (a, b) = resolve_names(&ti_vec![expr]);
-    let (checked, map) = type_check(&a);
+    let (a, _) = resolve_names(&ti_vec![expr]);
+    let (checked, _) = type_check(&a);
     dbg!(&checked);
     let expr = &checked.first().unwrap().value;
     let m = compile(expr);

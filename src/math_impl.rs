@@ -1,6 +1,7 @@
 use naga::{Expression, Handle, MathFunction};
+use parse::{ast::ComparisonOperator, type_checker};
 
-use crate::{Compiler, function::CompilingFunction};
+use crate::{Compiler, ScalarValue, function::CompilingFunction};
 
 pub enum NanCheckMode {
     /// Skip generating NaN checking code entirely. The result of evaluating a expression that produces any non-finite value is undefined.
@@ -19,9 +20,9 @@ pub struct NumericConfig {
     /// has no effect if [`nan_check_mode`](NumericConfig::nan_check_mode) is [`AssumeFinite`](NanCheckMode::AssumeFinite)
     ///
     /// Note: may significantly reduce performance of the generated code for NaN propagation, depending on the nan checking configuration.
-    do_nan_tracking: bool,
+    pub do_nan_tracking: bool,
     /// How and when NaN checks are performed on arithmetic operations
-    nan_check_mode: NanCheckMode,
+    pub nan_check_mode: NanCheckMode,
 }
 impl Default for NumericConfig {
     fn default() -> Self {
@@ -35,16 +36,16 @@ impl Default for NumericConfig {
     }
 }
 impl NumericConfig {
-    pub(crate) fn assume_finite(&self) -> bool {
+    pub(crate) fn assume_floats_finite(&self) -> bool {
         matches!(self.nan_check_mode, NanCheckMode::AssumeFinite)
     }
-    pub(crate) fn emulate_checks(&self) -> bool {
+    pub(crate) fn emulate_nan_checks(&self) -> bool {
         matches!(self.nan_check_mode, NanCheckMode::AssumeSupported)
     }
-    pub(crate) fn assume_supported(&self) -> bool {
+    pub(crate) fn assume_nan_supported(&self) -> bool {
         matches!(self.nan_check_mode, NanCheckMode::AssumeSupported)
     }
-    pub(crate) fn do_overflow_check(&self) -> bool {
+    pub(crate) fn do_overflow_nan_checks(&self) -> bool {
         matches!(
             self.nan_check_mode,
             NanCheckMode::PortabilityMode {
@@ -74,19 +75,24 @@ pub struct NanCheck {
 pub struct Float32 {
     /// value of this [`Float32`]. Do not use directly without a NaN-check if [`Float32::mode`] is [`MathMode::Checked`]
     value: Handle<Expression>,
-    /// The checking mode this value was produced under
+    /// The checking mode this value was produced under, as well as metadata containing tracking information
     mode: Metadata,
 }
 impl Float32 {
+    pub(crate) fn new_assume_finite(value: Handle<Expression>) -> Self {
+        Self {
+            value,
+            mode: Metadata::AssumeFinite,
+        }
+    }
     fn is_assume_finite(&self) -> bool {
         matches!(self.mode, Metadata::AssumeFinite)
     }
     fn get_or_materialize_check(&mut self, func: &mut CompilingFunction) -> Handle<Expression> {
         match &mut self.mode {
             Metadata::AssumeFinite => {
-                func.constants.false_bool
                 // unconditionally assume finite, cannot track source without check
-                //NanCheck { is_nan: func.constants.true_bool, source: None }
+                func.consts.false_bool
             }
             Metadata::Tracked(nan_check) => {
                 let c = nan_check.get_or_insert_with(|| {
@@ -119,17 +125,21 @@ impl Float32 {
         }
     }
     /// Gets the (possibly-NaN) bitwise representation of this [`Float32`] as a u32
-    fn bits(mut self, func: &mut CompilingFunction, ctx: &Compiler) -> Handle<Expression> {
+    pub(crate) fn bits(
+        mut self,
+        func: &mut CompilingFunction,
+        ctx: &Compiler,
+    ) -> Handle<Expression> {
         let cast = func.bitcast_to_u32(self.value);
         // manually propagate NaN if the compiler:
         // is not configured to globally assume finite
         // is not configured to assume the implementation supports representing NaN values
         // and the value is not assumed to be finite
-        if !ctx.config.numeric.assume_finite()
-            && !ctx.config.numeric.assume_supported()
+        if !ctx.config.numeric.assume_floats_finite()
+            && !ctx.config.numeric.assume_nan_supported()
             && !self.is_assume_finite()
         {
-            let mut nanval = func.constants.canonical_nan;
+            let mut nanval = func.consts.canonical_nan;
             if ctx.config.numeric.do_nan_tracking {
                 let source = self.get_or_materialize_source(func).unwrap();
                 nanval = func.add_unspanned(Expression::Binary {
@@ -149,12 +159,16 @@ impl Float32 {
         }
     }
 
-    fn from_bits(func: &mut CompilingFunction, ctx: &Compiler, bits: Handle<Expression>) -> Self {
+    pub(crate) fn from_bits(
+        func: &mut CompilingFunction,
+        ctx: &Compiler,
+        bits: Handle<Expression>,
+    ) -> Self {
         let value = func.bitcast_to_float(bits);
-        let mode = if ctx.config.numeric.assume_finite() {
+        let mode = if ctx.config.numeric.assume_floats_finite() {
             Metadata::AssumeFinite
         } else {
-            Metadata::Tracked(if !ctx.config.numeric.assume_supported() {
+            Metadata::Tracked(if !ctx.config.numeric.assume_nan_supported() {
                 // if the implementation can't represent NaN values precheck while we still have an integer
                 let is_nan = func.float_bits_are_nan(bits);
                 let source = if ctx.config.numeric.do_nan_tracking {
@@ -174,23 +188,76 @@ impl Float32 {
 }
 
 impl CompilingFunction {
+    // returns bool
+    pub(crate) fn cmp(
+        &mut self,
+        ctx: &Compiler,
+        comp: ComparisonOperator,
+        mut left: Float32,
+        mut right: Float32,
+    ) -> Handle<Expression> {
+        let mut cond = self.add_unspanned(naga::Expression::Binary {
+            op: match comp {
+                type_checker::ComparisonOperator::Equal => naga::BinaryOperator::Equal,
+                type_checker::ComparisonOperator::Less => naga::BinaryOperator::Less,
+                type_checker::ComparisonOperator::LessEqual => naga::BinaryOperator::LessEqual,
+                type_checker::ComparisonOperator::Greater => naga::BinaryOperator::Greater,
+                type_checker::ComparisonOperator::GreaterEqual => {
+                    naga::BinaryOperator::GreaterEqual
+                }
+            },
+            left: left.value,
+            right: right.value,
+        });
+        let left = left.get_or_materialize_check(self);
+        let right = right.get_or_materialize_check(self);
+        if !ctx.config.numeric.assume_floats_finite() {
+            let nanck = self.add_unspanned(Expression::Binary {
+                op: naga::BinaryOperator::LogicalOr,
+                left,
+                right,
+            });
+            cond = self.add_unspanned(Expression::Select {
+                condition: nanck,
+                accept: self.consts.false_bool,
+                reject: cond,
+            });
+        }
+        cond
+    }
+    pub(crate) fn new_literal(&mut self, val: f32) -> ScalarValue {
+        ScalarValue::Number(if val.is_nan() || val.is_infinite() {
+            Float32 {
+                value: self.consts.one_f32,
+                mode: Metadata::Tracked(Some(NanCheck {
+                    is_nan: self.consts.true_bool,
+                    source: None,
+                })),
+            }
+        } else {
+            Float32 {
+                value: self.add_preemit(Expression::Literal(naga::Literal::F32(val))),
+                mode: Metadata::AssumeFinite,
+            }
+        })
+    }
     fn float_bits_nan_payload(&mut self, bits: Handle<Expression>) -> Handle<Expression> {
         self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::ExclusiveOr,
             left: bits,
-            right: self.constants.canonical_nan,
+            right: self.consts.canonical_nan,
         })
     }
     fn float_bits_are_nan(&mut self, bits: Handle<Expression>) -> Handle<Expression> {
         let and_nanbase = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::And,
             left: bits,
-            right: self.constants.canonical_nan,
+            right: self.consts.canonical_nan,
         });
         self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Equal,
             left: and_nanbase,
-            right: self.constants.canonical_nan,
+            right: self.consts.canonical_nan,
         })
     }
     fn abs_log2(&mut self, float: Handle<Expression>) -> Handle<Expression> {
@@ -204,8 +271,8 @@ impl CompilingFunction {
         self.add_unspanned(Expression::Math {
             fun: naga::MathFunction::Clamp,
             arg: float,
-            arg1: Some(self.constants.one_f32),
-            arg2: Some(self.constants.max_f32),
+            arg1: Some(self.consts.one_f32),
+            arg2: Some(self.consts.max_f32),
             arg3: None,
         })
     }
@@ -278,7 +345,7 @@ impl CompilingFunction {
         let b_a_1 = self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Add,
             left: b_a,
-            right: self.constants.one_f32,
+            right: self.consts.one_f32,
         });
         let log_b_a_1 = self.abs_log2(b_a_1);
         let final_mag = self.add_unspanned(Expression::Binary {
@@ -289,7 +356,7 @@ impl CompilingFunction {
         self.add_unspanned(Expression::Binary {
             op: naga::BinaryOperator::Greater,
             left: final_mag,
-            right: self.constants.log2_max_f32,
+            right: self.consts.log2_max_f32,
         })
     }
     pub(crate) fn sw_propagate_nan<const OPERANDS: usize>(
@@ -308,7 +375,7 @@ impl CompilingFunction {
         // lift AssumeFinite values into tracked values (tracking meta is required for sw propagation)
         let Metadata::Tracked(Some(base)) = base.mode else {
             return NanCheck {
-                is_nan: self.constants.false_bool,
+                is_nan: self.consts.false_bool,
                 source: None,
             };
         };
@@ -325,9 +392,9 @@ impl CompilingFunction {
                 // get or zero source value for each operand
                 let s = b
                     .get_or_materialize_source(self)
-                    .unwrap_or(self.constants.zero_u32);
+                    .unwrap_or(self.consts.zero_u32);
 
-                let r = accum.source.get_or_insert(self.constants.zero_u32);
+                let r = accum.source.get_or_insert(self.consts.zero_u32);
                 *r = self.add_unspanned(Expression::Select {
                     condition: b_is_nan,
                     accept: s,
@@ -336,9 +403,10 @@ impl CompilingFunction {
             }
             accum
         });
+
         let is_nan = self.add_unspanned(Expression::Select {
             condition: operand_check.is_nan,
-            accept: self.constants.true_bool,
+            accept: self.consts.true_bool,
             reject: result_is_nan,
         });
         let source = if let Some(result_source_id) = result_source_id
@@ -373,7 +441,7 @@ impl CompilingFunction {
         ) -> Handle<Expression>,
     ) -> Float32 {
         let value = compute_res(self, args.map(|a| a.value));
-        if ctx.config.numeric.assume_finite() {
+        if ctx.config.numeric.assume_floats_finite() {
             Float32 {
                 value,
                 mode: Metadata::AssumeFinite,
@@ -384,7 +452,8 @@ impl CompilingFunction {
                 value,
                 // need to emulate propagation
                 mode: Metadata::Tracked(
-                    if !ctx.config.numeric.assume_supported() || ctx.config.numeric.do_nan_tracking
+                    if !ctx.config.numeric.assume_nan_supported()
+                        || ctx.config.numeric.do_nan_tracking
                     {
                         Some(self.sw_propagate_nan(
                             ctx,
@@ -409,7 +478,7 @@ impl CompilingFunction {
             ctx,
             [val],
             move |func, [val]| imp(func, val),
-            |f, _, _| f.constants.false_bool,
+            |f, _, _| f.consts.false_bool,
         )
     }
     pub(crate) fn add(&mut self, ctx: &Compiler, lhsf: Float32, rhsf: Float32) -> Float32 {
@@ -424,10 +493,11 @@ impl CompilingFunction {
                 })
             },
             |func, [lhs, rhs], config| {
-                if config.do_overflow_check() {
+                if config.do_overflow_nan_checks() {
                     func.check_sum(lhs.value, rhs.value)
                 } else {
-                    func.constants.false_bool
+                    // domain: R
+                    func.consts.false_bool
                 }
             },
         )
@@ -444,7 +514,7 @@ impl CompilingFunction {
                 })
             },
             |func, [lhs, rhs], config| {
-                if config.do_overflow_check() {
+                if config.do_overflow_nan_checks() {
                     // a - b = a + (-b)
                     let rhs = func.add_unspanned(Expression::Unary {
                         op: naga::UnaryOperator::Negate,
@@ -452,7 +522,8 @@ impl CompilingFunction {
                     });
                     func.check_sum(lhs.value, rhs)
                 } else {
-                    func.constants.false_bool
+                    // domain: R
+                    func.consts.false_bool
                 }
             },
         )
@@ -469,7 +540,7 @@ impl CompilingFunction {
                 })
             },
             |func, [lhs, rhs], config| {
-                if config.do_overflow_check() {
+                if config.do_overflow_nan_checks() {
                     let labs = func.abs_log2(lhs.value);
                     let rabs = func.abs_log2(rhs.value);
                     let f = func.add_unspanned(Expression::Binary {
@@ -480,10 +551,11 @@ impl CompilingFunction {
                     func.add_unspanned(Expression::Binary {
                         op: naga::BinaryOperator::Greater,
                         left: f,
-                        right: func.constants.log2_max_f32,
+                        right: func.consts.log2_max_f32,
                     })
                 } else {
-                    func.constants.false_bool
+                    // domain: R
+                    func.consts.false_bool
                 }
             },
         )
@@ -503,9 +575,9 @@ impl CompilingFunction {
                 let domain_check = func.add_unspanned(Expression::Binary {
                     op: naga::BinaryOperator::Equal,
                     left: rhs.value,
-                    right: func.constants.zero_f32,
+                    right: func.consts.zero_f32,
                 });
-                if config.do_overflow_check() {
+                if config.do_overflow_nan_checks() {
                     let labs = func.abs_log2(lhs.value);
                     let rabs = func.abs_log2(rhs.value);
                     let f = func.add_unspanned(Expression::Binary {
@@ -516,7 +588,7 @@ impl CompilingFunction {
                     let overflow = func.add_unspanned(Expression::Binary {
                         op: naga::BinaryOperator::Greater,
                         left: f,
-                        right: func.constants.log2_max_f32,
+                        right: func.consts.log2_max_f32,
                     });
                     func.add_unspanned(Expression::Binary {
                         op: naga::BinaryOperator::LogicalOr,
@@ -524,6 +596,7 @@ impl CompilingFunction {
                         right: domain_check,
                     })
                 } else {
+                    // domain: a in R s.t. a != 0
                     domain_check
                 }
             },
@@ -540,7 +613,7 @@ impl CompilingFunction {
                 })
             },
             // negation of a finite value is a finite value
-            |f, _, _| f.constants.false_bool,
+            |f, _, _| f.consts.false_bool,
         )
     }
     pub(crate) fn sqrt(&mut self, ctx: &Compiler, val: Float32) -> Float32 {
@@ -558,10 +631,11 @@ impl CompilingFunction {
             },
             |f, [v], _| {
                 // Sqrt strictly shrinks the magnitude of the operand
+                // domain: R+ | 0
                 f.add_unspanned(Expression::Binary {
                     op: naga::BinaryOperator::Less,
                     left: v.value,
-                    right: f.constants.zero_f32,
+                    right: f.consts.zero_f32,
                 })
             },
         )
@@ -580,14 +654,16 @@ impl CompilingFunction {
                 })
             },
             |f, [v], _| {
-                // ln strictly shrinks the magnitude of the output if positive.
+                // ln strictly contracts the magnitude of the operand if operand >= 1.
                 // If the operand is less than one, the magnitude may increase
                 // but may not be greater than 15.9 as |ln(f32::EPSILON)| ~= 15.94,
                 // so no magnitude checking is required
+
+                // domain: R+
                 f.add_unspanned(Expression::Binary {
                     op: naga::BinaryOperator::LessEqual,
                     left: v.value,
-                    right: f.constants.zero_f32,
+                    right: f.consts.zero_f32,
                 })
             },
         )
@@ -605,12 +681,20 @@ impl CompilingFunction {
                     arg3: None,
                 })
             },
-            |func, [arg], _| {
-                func.add_unspanned(Expression::Binary {
-                    op: naga::BinaryOperator::Greater,
-                    left: arg.value,
-                    right: func.constants.ln_max_f32,
-                })
+            |func, [arg], c| {
+                if c.do_overflow_nan_checks() {
+                    // we are interested in detecting exp(x) > f32::MAX, but computing this will cause +inf.
+                    // we simply manipulate this inequality into the form x > ln(f32::MAX), precomputing the rhs
+                    func.add_unspanned(Expression::Binary {
+                        op: naga::BinaryOperator::Greater,
+                        left: arg.value,
+                        right: func.consts.ln_max_f32,
+                    })
+                } else {
+                    func.consts.false_bool
+                }
+
+                // domain: R
             },
         )
     }
