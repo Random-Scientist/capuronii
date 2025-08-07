@@ -10,9 +10,9 @@ pub enum NanCheckMode {
     /// and implement NaN checking with a bitwise inspection of the value for NaN bit patterns.
     AssumeSupported,
     /// Emulate NaN checking in software.
-    /// If `do_overflow_check` is `true`, this checking includes logarithmic magnitude comparisons to
+    /// If [`do_overflow_check`](NanCheckMode::PortabilityMode::do_overflow_check) is `true`, this checking includes logarithmic magnitude comparisons to
     /// detect when numeric operations overflow, at a significant performance cost.
-    /// Always performs domain checking i.e. checks for division by zero, even roots of negative numbers etc.
+    /// Always performs domain checking e.g. division by zero, even roots of negative numbers... etc.
     PortabilityMode { do_overflow_check: bool },
 }
 pub struct NumericConfig {
@@ -38,9 +38,6 @@ impl Default for NumericConfig {
 impl NumericConfig {
     pub(crate) fn assume_floats_finite(&self) -> bool {
         matches!(self.nan_check_mode, NanCheckMode::AssumeFinite)
-    }
-    pub(crate) fn emulate_nan_checks(&self) -> bool {
-        matches!(self.nan_check_mode, NanCheckMode::AssumeSupported)
     }
     pub(crate) fn assume_nan_supported(&self) -> bool {
         matches!(self.nan_check_mode, NanCheckMode::AssumeSupported)
@@ -609,7 +606,7 @@ impl CompilingFunction {
             |f, [v]| {
                 f.add_unspanned(Expression::Unary {
                     op: naga::UnaryOperator::Negate,
-                    expr: val.value,
+                    expr: v,
                 })
             },
             // negation of a finite value is a finite value
@@ -699,10 +696,10 @@ impl CompilingFunction {
         )
     }
     //TODO erf
-    fn nnan_un_math_func(&mut self, ctx: &Compiler, val: Float32, func: MathFunction) -> Float32 {
+    fn nnan_un_math_func(&mut self, ctx: &Compiler, val: Float32, fun: MathFunction) -> Float32 {
         self.non_nan_unary_fp_op(ctx, val, |func, val| {
             func.add_unspanned(Expression::Math {
-                fun: naga::MathFunction::Sin,
+                fun,
                 arg: val,
                 arg1: None,
                 arg2: None,

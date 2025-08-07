@@ -518,67 +518,76 @@ fn compile_scalar(
             func.deserialize_scalar(ctx, s, ty)
         }
         type_checker::Expression::SumProd { .. } => todo!(),
-        type_checker::Expression::BuiltIn { name, args } => match name {
-            BuiltIn::Ln => todo!(),
-            BuiltIn::Exp => todo!(),
-            BuiltIn::Erf => todo!(),
-            BuiltIn::Sin => todo!(),
-            BuiltIn::Cos => todo!(),
-            BuiltIn::Tan => todo!(),
-            BuiltIn::Sec => todo!(),
-            BuiltIn::Csc => todo!(),
-            BuiltIn::Cot => todo!(),
-            BuiltIn::Sinh => todo!(),
-            BuiltIn::Cosh => todo!(),
-            BuiltIn::Tanh => todo!(),
-            BuiltIn::Sech => todo!(),
-            BuiltIn::Csch => todo!(),
-            BuiltIn::Coth => todo!(),
-            BuiltIn::Asin => todo!(),
-            BuiltIn::Acos => todo!(),
-            BuiltIn::Atan => todo!(),
-            BuiltIn::Atan2 => todo!(),
-            BuiltIn::Asec => todo!(),
-            BuiltIn::Acsc => todo!(),
-            BuiltIn::Acot => todo!(),
-            BuiltIn::Asinh => todo!(),
-            BuiltIn::Acosh => todo!(),
-            BuiltIn::Atanh => todo!(),
-            BuiltIn::Asech => todo!(),
-            BuiltIn::Acsch => todo!(),
-            BuiltIn::Acoth => todo!(),
-            BuiltIn::Abs => todo!(),
-            BuiltIn::Sgn => todo!(),
-            BuiltIn::Round => todo!(),
-            BuiltIn::Floor => todo!(),
-            BuiltIn::Ceil => todo!(),
-            BuiltIn::Mod => todo!(),
-            BuiltIn::Midpoint => todo!(),
-            BuiltIn::Distance => todo!(),
-            BuiltIn::Min => todo!(),
-            BuiltIn::Max => todo!(),
-            BuiltIn::Median => todo!(),
-            BuiltIn::TotalNumber => todo!(),
-            BuiltIn::TotalPoint => todo!(),
-            BuiltIn::MeanNumber => todo!(),
-            BuiltIn::MeanPoint => todo!(),
-            BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
-                let l = collect_list(&args[0]);
-                let len = l.compute_len(ctx, func);
-                ScalarValue::Number(Float32::new_assume_finite(func.u32_to_float(len)))
+        type_checker::Expression::BuiltIn { name, args } => {
+            let mut scalar_num =
+                |p: fn(&mut CompilingFunction, ctx: &Compiler, ctx: Float32) -> Float32| {
+                    ScalarValue::Number({
+                        let s = compile_scalar(ctx, func, &args[0]).expect_number();
+                        p(func, ctx, s)
+                    })
+                };
+            match name {
+                BuiltIn::Ln => scalar_num(CompilingFunction::ln),
+                BuiltIn::Exp => scalar_num(CompilingFunction::exp),
+                BuiltIn::Erf => todo!(),
+                BuiltIn::Sin => scalar_num(CompilingFunction::sin),
+                BuiltIn::Cos => scalar_num(CompilingFunction::cos),
+                BuiltIn::Tan => todo!(),
+                BuiltIn::Sec => todo!(),
+                BuiltIn::Csc => todo!(),
+                BuiltIn::Cot => todo!(),
+                BuiltIn::Sinh => todo!(),
+                BuiltIn::Cosh => todo!(),
+                BuiltIn::Tanh => todo!(),
+                BuiltIn::Sech => todo!(),
+                BuiltIn::Csch => todo!(),
+                BuiltIn::Coth => todo!(),
+                BuiltIn::Asin => todo!(),
+                BuiltIn::Acos => todo!(),
+                BuiltIn::Atan => todo!(),
+                BuiltIn::Atan2 => todo!(),
+                BuiltIn::Asec => todo!(),
+                BuiltIn::Acsc => todo!(),
+                BuiltIn::Acot => todo!(),
+                BuiltIn::Asinh => todo!(),
+                BuiltIn::Acosh => todo!(),
+                BuiltIn::Atanh => todo!(),
+                BuiltIn::Asech => todo!(),
+                BuiltIn::Acsch => todo!(),
+                BuiltIn::Acoth => todo!(),
+                BuiltIn::Abs => todo!(),
+                BuiltIn::Sgn => todo!(),
+                BuiltIn::Round => todo!(),
+                BuiltIn::Floor => todo!(),
+                BuiltIn::Ceil => todo!(),
+                BuiltIn::Mod => todo!(),
+                BuiltIn::Midpoint => todo!(),
+                BuiltIn::Distance => todo!(),
+                BuiltIn::Min => todo!(),
+                BuiltIn::Max => todo!(),
+                BuiltIn::Median => todo!(),
+                BuiltIn::TotalNumber => todo!(),
+                BuiltIn::TotalPoint => todo!(),
+                BuiltIn::MeanNumber => todo!(),
+                BuiltIn::MeanPoint => todo!(),
+                BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
+                    let l = collect_list(&args[0]);
+                    let len = l.compute_len(ctx, func);
+                    ScalarValue::Number(Float32::new_assume_finite(func.u32_to_float(len)))
+                }
+                BuiltIn::UniqueNumber => todo!(),
+                BuiltIn::UniquePoint => todo!(),
+                BuiltIn::UniquePolygon => todo!(),
+                BuiltIn::Sort => todo!(),
+                BuiltIn::SortKeyNumber => todo!(),
+                BuiltIn::SortKeyPoint => todo!(),
+                BuiltIn::SortKeyPolygon => todo!(),
+                BuiltIn::Polygon => todo!(),
+                BuiltIn::JoinNumber => todo!(),
+                BuiltIn::JoinPoint => todo!(),
+                BuiltIn::JoinPolygon => todo!(),
             }
-            BuiltIn::UniqueNumber => todo!(),
-            BuiltIn::UniquePoint => todo!(),
-            BuiltIn::UniquePolygon => todo!(),
-            BuiltIn::Sort => todo!(),
-            BuiltIn::SortKeyNumber => todo!(),
-            BuiltIn::SortKeyPoint => todo!(),
-            BuiltIn::SortKeyPolygon => todo!(),
-            BuiltIn::Polygon => todo!(),
-            BuiltIn::JoinNumber => todo!(),
-            BuiltIn::JoinPoint => todo!(),
-            BuiltIn::JoinPolygon => todo!(),
-        },
+        }
         type_checker::Expression::List(_)
         | type_checker::Expression::ListRange { .. }
         | type_checker::Expression::For { .. }
