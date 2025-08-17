@@ -9,6 +9,7 @@ use crate::{
     alloc::{Alloc, StackAlloc, StaticAlloc},
     compile_scalar,
     function::CompilingFunction,
+    math_impl::Float32,
 };
 
 pub struct LazyBroadcast<'a> {
@@ -49,7 +50,7 @@ impl LazyBroadcast<'_> {
         // bind varyings
         for (id, list) in self.varying {
             let assignment = func.in_inner().get_scalar_assignment(ctx, id, list.ty);
-            let value = list.index(idx, ctx, func);
+            let value = list.index_direct(func, ctx, idx);
             let inner = func.in_inner();
             let s = inner.serialize_scalar(ctx, value);
             inner.store(assignment, s);
@@ -117,7 +118,7 @@ impl LazyComprehension<'_> {
                 left: prev_section_len,
                 right: length,
             });
-            let val = value.index(index, ctx, blocks);
+            let val = value.index_direct(blocks, ctx, index);
 
             let func = blocks.in_inner();
             let s = func.get_scalar_assignment(ctx, assignment, out_ty);
@@ -199,7 +200,7 @@ impl Join<'_> {
                 right: curr_start_idx,
             });
 
-            let val = list.index(transformed_idx, ctx, blocks);
+            let val = list.index_direct(blocks, ctx, transformed_idx);
             ty = Some(val.ty());
             let func = blocks.in_inner();
 
@@ -280,7 +281,7 @@ impl Filter<'_> {
         let test = self.filter.index(this_iter_index, ctx, &mut other);
 
         let mut loop_block = other.in_inner().new_block();
-        let result = self.src.index(this_iter_index, ctx, &mut other);
+        let result = self.src.index_direct(&mut other, ctx, this_iter_index);
 
         let func = other.in_inner();
 
@@ -300,7 +301,7 @@ impl Filter<'_> {
         func.swap_block(&mut loop_block);
         let success_case = loop_block;
         func.push_statement(naga::Statement::If {
-            condition: test.expect_bool(),
+            condition: test.bool(),
             accept: success_case,
             reject: Block::new(),
         });
@@ -452,7 +453,7 @@ impl ListDef<'_> {
             }
             UntypedListDef::Select(select) => {
                 let test = *self.cached_select_test.get_or_insert_with(|| {
-                    let i = compile_scalar(ctx, func, select.test).expect_bool();
+                    let i = compile_scalar(ctx, func, select.test).bool();
                     func.emit_exprs();
                     i
                 });
@@ -481,9 +482,50 @@ impl ListDef<'_> {
     }
     pub(crate) fn index(
         mut self,
-        idx: Handle<naga::Expression>,
+        mut func: &mut CompilingFunction,
         ctx: &mut Compiler,
+        index: Float32,
+    ) -> ScalarValue {
+        let len = self.compute_len_inner(ctx, func);
+        let one = Float32::new_assume_finite(func.consts.one_f32);
+        // additionally serves as a NaN check, since NaN > n will return false
+        let check = func.cmp(
+            ctx,
+            type_checker::ComparisonOperator::GreaterEqual,
+            index,
+            one,
+        );
+
+        let idx_p_1 = func.add_unspanned(naga::Expression::As {
+            expr: index.value,
+            kind: naga::ScalarKind::Uint,
+            convert: Some(4),
+        });
+        let idx = func.add_unspanned(naga::Expression::Binary {
+            op: naga::BinaryOperator::Subtract,
+            left: idx_p_1,
+            right: func.consts.one_u32,
+        });
+
+        let boundck = func.add_unspanned(naga::Expression::Binary {
+            op: naga::BinaryOperator::Less,
+            left: idx,
+            right: len,
+        });
+        let check = func.add_unspanned(naga::Expression::Binary {
+            op: naga::BinaryOperator::LogicalAnd,
+            left: check,
+            right: boundck,
+        });
+        let nan = func.nan_value_for_ty(self.ty);
+        let indexed = self.index_direct(&mut func, ctx, idx);
+        func.select_scalar(ctx, check, indexed, nan)
+    }
+    pub(crate) fn index_direct(
+        mut self,
         blocks: &mut impl MaybeSwitchBlock,
+        ctx: &mut Compiler,
+        idx: Handle<naga::Expression>,
     ) -> ScalarValue {
         match self.inner {
             UntypedListDef::Materialized(materialized_list) => {
@@ -523,7 +565,8 @@ impl ListDef<'_> {
                         ty: new_arr_ty,
                         components,
                     });
-                    let loc = func.new_local(new_arr_ty, Some(arr), None);
+                    let loc = func.new_local(new_arr_ty, None, None);
+                    func.store(loc, arr);
 
                     UntypedListDef::Materialized(MaterializedList::Allocated(Alloc::Static(
                         StaticAlloc {
@@ -532,25 +575,25 @@ impl ListDef<'_> {
                         },
                     )))
                 };
-                self.index(idx, ctx, blocks)
+                self.index_direct(blocks, ctx, idx)
             }
             UntypedListDef::Join(join) => join.index(idx, ctx, blocks),
             UntypedListDef::Filter(filter) => {
                 self.inner =
                     UntypedListDef::Materialized(filter.materialize(ctx, blocks.in_outer()));
-                self.index(idx, ctx, blocks)
+                self.index_direct(blocks, ctx, idx)
             }
             UntypedListDef::Select(select) => {
                 let test = *self.cached_select_test.get_or_insert_with(|| {
                     let out = blocks.in_outer();
                     let i = compile_scalar(ctx, out, select.test);
                     out.emit_exprs();
-                    i.expect_bool()
+                    i.bool()
                 });
                 let index_result =
                     blocks
                         .in_outer()
-                        .new_local(ctx.scalar_type(self.ty), None, None);
+                        .new_local(ctx.scalar_type_repr(self.ty), None, None);
 
                 let func = blocks.in_outer();
 
@@ -565,7 +608,7 @@ impl ListDef<'_> {
                     select
                         .consequent_alternate
                         .0
-                        .index(idx, ctx, &mut blocks_consequent);
+                        .index_direct(&mut blocks_consequent, ctx, idx);
                 let ser = blocks_consequent
                     .in_inner()
                     .serialize_scalar(ctx, indexed_consequent);
@@ -586,7 +629,7 @@ impl ListDef<'_> {
                     select
                         .consequent_alternate
                         .1
-                        .index(idx, ctx, &mut blocks_alternate);
+                        .index_direct(&mut blocks_alternate, ctx, idx);
                 let ser = blocks_alternate
                     .in_inner()
                     .serialize_scalar(ctx, indexed_alternate);
@@ -650,7 +693,7 @@ impl ListDef<'_> {
                     in_eval: true,
                 };
 
-                let val = self.index(this_iter_ofs, ctx, &mut b);
+                let val = self.index_direct(&mut b, ctx, this_iter_ofs);
                 let func = b.in_inner();
 
                 func.store_to_alloc_typed(ctx, alloc, this_iter_ofs, val);

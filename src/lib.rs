@@ -2,7 +2,10 @@ use naga::{
     AddressSpace, Arena, GlobalVariable, Handle, Module, ResourceBinding, StorageAccess,
     UniqueArena,
 };
-use parse::type_checker::{self, BaseType, BuiltIn, TypedExpression};
+use parse::{
+    op::Op,
+    type_checker::{self, BaseType, TypedExpression},
+};
 use std::{collections::HashMap, mem::MaybeUninit};
 use typed_index_collections::{TiVec, ti_vec};
 
@@ -39,7 +42,8 @@ impl ScalarValue {
             ScalarValue::Bool(_) => BaseType::Bool,
         }
     }
-    fn expect_number(self) -> Float32 {
+    #[track_caller]
+    fn num(self) -> Float32 {
         match self {
             ScalarValue::Number(n) => n,
             ScalarValue::Point(_) | ScalarValue::Bool(_) => {
@@ -47,7 +51,8 @@ impl ScalarValue {
             }
         }
     }
-    fn expect_point(self) -> [Float32; POINT_SIZE as usize] {
+    #[track_caller]
+    fn pt(self) -> [Float32; POINT_SIZE as usize] {
         match self {
             ScalarValue::Number(_) | ScalarValue::Bool(_) => {
                 panic!("expected a point, got a number or bool")
@@ -55,7 +60,8 @@ impl ScalarValue {
             ScalarValue::Point(p) => p,
         }
     }
-    fn expect_bool(self) -> Handle<naga::Expression> {
+    #[track_caller]
+    fn bool(self) -> Handle<naga::Expression> {
         match self {
             ScalarValue::Number(_) | ScalarValue::Point(_) => {
                 panic!("expected a bool, got a number or point")
@@ -237,7 +243,7 @@ impl Compiler {
             BaseType::Number => self.types.u32,
             BaseType::Point => self.types.point_repr,
             BaseType::Polygon => todo!(),
-            BaseType::Bool => todo!(),
+            BaseType::Bool => self.types.bool,
             BaseType::Empty => todo!(),
         }
     }
@@ -275,27 +281,6 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
                 scalars,
             }),
         ),
-        type_checker::Expression::BinaryOperation {
-            operation,
-            left,
-            right,
-        } => {
-            let right = collect_list(right);
-            let UntypedListDef::Broadcast(filter) = right.inner else {
-                panic!()
-            };
-            match operation {
-                type_checker::BinaryOperator::FilterNumberList
-                | type_checker::BinaryOperator::FilterPointList => ListDef::new(
-                    base,
-                    listdef::UntypedListDef::Filter(Filter {
-                        src: Box::new(collect_list(left)),
-                        filter,
-                    }),
-                ),
-                _ => unreachable!(),
-            }
-        }
         type_checker::Expression::Piecewise {
             test,
             consequent,
@@ -318,8 +303,33 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
                 body,
             }),
         ),
-        type_checker::Expression::BuiltIn { name, args } => match name {
-            BuiltIn::JoinNumber | BuiltIn::JoinPoint => {
+        type_checker::Expression::Op { operation, args } => match operation {
+            Op::FilterNumberList | Op::FilterPointList => {
+                let (left, right) = (&args[0], &args[1]);
+                let right = collect_list(right);
+                let UntypedListDef::Broadcast(filter) = right.inner else {
+                    panic!()
+                };
+                ListDef::new(
+                    base,
+                    listdef::UntypedListDef::Filter(Filter {
+                        src: Box::new(collect_list(left)),
+                        filter,
+                    }),
+                )
+            }
+            Op::TotalNumber | Op::TotalPoint => todo!(),
+            Op::MeanNumber | Op::MeanPoint => todo!(),
+            Op::CountNumber | Op::CountPoint => todo!(),
+            Op::UniqueNumber | Op::UniquePoint => todo!(),
+            Op::Sort => todo!(),
+            Op::SortKeyNumber => todo!(),
+            Op::SortKeyPoint => todo!(),
+            Op::SortKeyPolygon => todo!(),
+            Op::JoinPolygon | Op::UniquePolygon | Op::CountPolygon | Op::FilterPolygonList => {
+                todo!()
+            }
+            Op::JoinNumber | Op::JoinPoint => {
                 let mut current_scalar_batch = 0..0;
                 let mut listdefs = Vec::new();
                 for (idx, val) in args.iter().enumerate() {
@@ -352,8 +362,7 @@ pub(crate) fn collect_list<'a>(expr: &'a TypedExpression) -> ListDef<'a> {
                     UntypedListDef::Join(Join { lists: listdefs }),
                 )
             }
-
-            _ => unimplemented!(),
+            a => panic!("operation {a:?} not yet supported"),
         },
         _ => unreachable!(),
     }
@@ -373,116 +382,14 @@ fn compile_scalar(
             let ser = func.load(assignment);
             func.deserialize_scalar(ctx, ser, ty)
         }
-        type_checker::Expression::UnaryOperation { operation, arg } => {
-            let arg = compile_scalar(ctx, func, arg);
-            'number: {
-                return ScalarValue::Number(match operation {
-                    type_checker::UnaryOperator::NegNumber => func.negate(ctx, arg.expect_number()),
-                    type_checker::UnaryOperator::Fac => todo!(),
-                    type_checker::UnaryOperator::Sqrt => func.sqrt(ctx, arg.expect_number()),
-                    type_checker::UnaryOperator::Abs => func.abs(ctx, arg.expect_number()),
-                    type_checker::UnaryOperator::PointX => arg.expect_point()[0],
-                    type_checker::UnaryOperator::PointY => arg.expect_point()[1],
-                    type_checker::UnaryOperator::Mag => arg
-                        .expect_point()
-                        .map(|coord| func.mul(ctx, coord, coord))
-                        .into_iter()
-                        .fold_on(|r, l| func.add(ctx, r, l))
-                        .expect("point length may not be zero"),
-                    _ => break 'number,
-                });
-            }
-            ScalarValue::Point(match operation {
-                type_checker::UnaryOperator::NegPoint => {
-                    arg.expect_point().map(|coord| func.negate(ctx, coord))
-                }
-                _ => unreachable!(),
-            })
-        }
-        type_checker::Expression::BinaryOperation {
-            operation,
-            left,
-            right,
-        } => {
-            if left.ty.is_list() {
-                match operation {
-                    type_checker::BinaryOperator::IndexNumberList => todo!(),
-                    type_checker::BinaryOperator::IndexPointList => todo!(),
-                    type_checker::BinaryOperator::IndexPolygonList => todo!(),
-                    type_checker::BinaryOperator::FilterNumberList => todo!(),
-                    type_checker::BinaryOperator::FilterPointList => todo!(),
-                    type_checker::BinaryOperator::FilterPolygonList => todo!(),
-                    _ => unreachable!(),
-                }
-            } else {
-                let (left, right) = (
-                    compile_scalar(ctx, func, left),
-                    compile_scalar(ctx, func, right),
-                );
-                ScalarValue::Point('point: {
-                    return ScalarValue::Number(match operation {
-                        type_checker::BinaryOperator::AddNumber => {
-                            func.add(ctx, left.expect_number(), right.expect_number())
-                        }
-                        type_checker::BinaryOperator::AddPoint => {
-                            break 'point array_zip(
-                                [left.expect_point(), right.expect_point()],
-                                |[lc, rc]| func.add(ctx, lc, rc),
-                            );
-                        }
-                        type_checker::BinaryOperator::SubNumber => {
-                            func.sub(ctx, left.expect_number(), right.expect_number())
-                        }
-                        type_checker::BinaryOperator::SubPoint => {
-                            break 'point array_zip(
-                                [left.expect_point(), right.expect_point()],
-                                |[lc, rc]| func.sub(ctx, lc, rc),
-                            );
-                        }
-                        type_checker::BinaryOperator::MulNumber => {
-                            func.mul(ctx, left.expect_number(), right.expect_number())
-                        }
-                        type_checker::BinaryOperator::MulPointNumber => {
-                            break 'point array_zip(
-                                [
-                                    left.expect_point(),
-                                    std::array::from_fn(|_| right.expect_number()),
-                                ],
-                                |[lc, rc]| func.mul(ctx, lc, rc),
-                            );
-                        }
-                        type_checker::BinaryOperator::MulNumberPoint => todo!(),
-                        type_checker::BinaryOperator::DivNumber => {
-                            func.div(ctx, left.expect_number(), right.expect_number())
-                        }
-                        type_checker::BinaryOperator::DivPointNumber => {
-                            break 'point array_zip(
-                                [
-                                    left.expect_point(),
-                                    std::array::from_fn(|_| right.expect_number()),
-                                ],
-                                |[lc, rc]| func.div(ctx, lc, rc),
-                            );
-                        }
-                        type_checker::BinaryOperator::Pow => todo!(),
-                        type_checker::BinaryOperator::Dot => todo!(),
-
-                        type_checker::BinaryOperator::Point => {
-                            break 'point [left.expect_number(), right.expect_number()];
-                        }
-                        _ => unreachable!(),
-                    });
-                })
-            }
-        }
         type_checker::Expression::ChainedComparison {
             operands,
             operators,
         } => {
-            let mut initial = compile_scalar(ctx, func, &operands[0]).expect_number();
+            let mut initial = compile_scalar(ctx, func, &operands[0]).num();
             let mut expr = None;
             for (operand, operator) in operands[1..].iter().zip(operators) {
-                let current = compile_scalar(ctx, func, operand).expect_number();
+                let current = compile_scalar(ctx, func, operand).num();
 
                 let cond = func.cmp(ctx, *operator, initial, current);
                 initial = current;
@@ -507,91 +414,158 @@ fn compile_scalar(
                 [test, consequent, alternate].map(|a| compile_scalar(ctx, func, a));
             let ty = accept.ty();
             assert!(ty == reject.ty(), "divergent piecewise return type");
-
-            let accept = func.serialize_scalar(ctx, accept);
-            let reject = func.serialize_scalar(ctx, reject);
-            let s = func.add_unspanned(naga::Expression::Select {
-                condition: condition.expect_bool(),
-                accept,
-                reject,
-            });
-            func.deserialize_scalar(ctx, s, ty)
+            func.select_scalar(ctx, condition.bool(), accept, reject)
         }
         type_checker::Expression::SumProd { .. } => todo!(),
-        type_checker::Expression::BuiltIn { name, args } => {
-            let mut scalar_num =
-                |p: fn(&mut CompilingFunction, ctx: &Compiler, ctx: Float32) -> Float32| {
-                    ScalarValue::Number({
-                        let s = compile_scalar(ctx, func, &args[0]).expect_number();
-                        p(func, ctx, s)
-                    })
-                };
-            match name {
-                BuiltIn::Ln => scalar_num(CompilingFunction::ln),
-                BuiltIn::Exp => scalar_num(CompilingFunction::exp),
-                BuiltIn::Erf => todo!(),
-                BuiltIn::Sin => scalar_num(CompilingFunction::sin),
-                BuiltIn::Cos => scalar_num(CompilingFunction::cos),
-                BuiltIn::Tan => todo!(),
-                BuiltIn::Sec => todo!(),
-                BuiltIn::Csc => todo!(),
-                BuiltIn::Cot => todo!(),
-                BuiltIn::Sinh => todo!(),
-                BuiltIn::Cosh => todo!(),
-                BuiltIn::Tanh => todo!(),
-                BuiltIn::Sech => todo!(),
-                BuiltIn::Csch => todo!(),
-                BuiltIn::Coth => todo!(),
-                BuiltIn::Asin => todo!(),
-                BuiltIn::Acos => todo!(),
-                BuiltIn::Atan => todo!(),
-                BuiltIn::Atan2 => todo!(),
-                BuiltIn::Asec => todo!(),
-                BuiltIn::Acsc => todo!(),
-                BuiltIn::Acot => todo!(),
-                BuiltIn::Asinh => todo!(),
-                BuiltIn::Acosh => todo!(),
-                BuiltIn::Atanh => todo!(),
-                BuiltIn::Asech => todo!(),
-                BuiltIn::Acsch => todo!(),
-                BuiltIn::Acoth => todo!(),
-                BuiltIn::Abs => todo!(),
-                BuiltIn::Sgn => todo!(),
-                BuiltIn::Round => todo!(),
-                BuiltIn::Floor => todo!(),
-                BuiltIn::Ceil => todo!(),
-                BuiltIn::Mod => todo!(),
-                BuiltIn::Midpoint => todo!(),
-                BuiltIn::Distance => todo!(),
-                BuiltIn::Min => todo!(),
-                BuiltIn::Max => todo!(),
-                BuiltIn::Median => todo!(),
-                BuiltIn::TotalNumber => todo!(),
-                BuiltIn::TotalPoint => todo!(),
-                BuiltIn::MeanNumber => todo!(),
-                BuiltIn::MeanPoint => todo!(),
-                BuiltIn::CountNumber | BuiltIn::CountPoint | BuiltIn::CountPolygon => {
-                    let l = collect_list(&args[0]);
-                    let len = l.compute_len(ctx, func);
-                    ScalarValue::Number(Float32::new_assume_finite(func.u32_to_float(len)))
-                }
-                BuiltIn::UniqueNumber => todo!(),
-                BuiltIn::UniquePoint => todo!(),
-                BuiltIn::UniquePolygon => todo!(),
-                BuiltIn::Sort => todo!(),
-                BuiltIn::SortKeyNumber => todo!(),
-                BuiltIn::SortKeyPoint => todo!(),
-                BuiltIn::SortKeyPolygon => todo!(),
-                BuiltIn::Polygon => todo!(),
-                BuiltIn::JoinNumber => todo!(),
-                BuiltIn::JoinPoint => todo!(),
-                BuiltIn::JoinPolygon => todo!(),
-            }
-        }
         type_checker::Expression::List(_)
         | type_checker::Expression::ListRange { .. }
         | type_checker::Expression::For { .. }
         | type_checker::Expression::Broadcast { .. } => unreachable!(),
+        type_checker::Expression::Op { operation, args } => match operation {
+            operation if operation.sig().return_type.is_list() => {
+                panic!("expected a scalar");
+            }
+            op => {
+                enum Either<T, U> {
+                    Left(T),
+                    Right(U),
+                }
+                let mut compiled_args = Vec::with_capacity(op.sig().param_types.len());
+                for (ty, arg) in op.sig().param_types.iter().zip(args.iter()) {
+                    compiled_args.push(if ty.is_list() {
+                        Either::Left(collect_list(arg))
+                    } else {
+                        Either::Right(compile_scalar(ctx, func, arg))
+                    });
+                }
+                let mut compiled_it = compiled_args.into_iter();
+                let mut arg = move || compiled_it.next().expect("expected an argument");
+                let scalar = |a| {
+                    let Either::Right(s) = a else {
+                        panic!("expected a scalar, got a list")
+                    };
+                    s
+                };
+                let list = |a| {
+                    let Either::Left(l) = a else {
+                        panic!("expected a list, got a scalar")
+                    };
+                    l
+                };
+                ScalarValue::Point('point: {
+                    return ScalarValue::Number(match op {
+                        Op::NegNumber => func.negate(ctx, scalar(arg()).num()),
+                        Op::NegPoint => {
+                            break 'point scalar(arg()).pt().map(|v| func.negate(ctx, v));
+                        }
+                        Op::Fac => todo!(),
+                        Op::Sqrt => func.sqrt(ctx, scalar(arg()).num()),
+                        Op::Mag => todo!(),
+                        Op::PointX => scalar(arg()).pt()[0],
+                        Op::PointY => scalar(arg()).pt()[1],
+                        Op::AddNumber => todo!(),
+                        Op::AddPoint => {
+                            break 'point array_zip(
+                                [scalar(arg()).pt(), scalar(arg()).pt()],
+                                |[lc, rc]| func.add(ctx, lc, rc),
+                            );
+                        }
+                        Op::SubNumber => func.add(ctx, scalar(arg()).num(), scalar(arg()).num()),
+                        Op::SubPoint => {
+                            break 'point array_zip(
+                                [scalar(arg()).pt(), scalar(arg()).pt()],
+                                |[lc, rc]| func.sub(ctx, lc, rc),
+                            );
+                        }
+                        Op::MulNumber => func.mul(ctx, scalar(arg()).num(), scalar(arg()).num()),
+                        Op::MulNumberPoint => {
+                            let n = scalar(arg()).num();
+                            break 'point scalar(arg()).pt().map(|v| func.mul(ctx, n, v));
+                        }
+                        Op::DivNumber => func.mul(ctx, scalar(arg()).num(), scalar(arg()).num()),
+                        Op::DivPointNumber => {
+                            let pt = scalar(arg()).pt();
+                            let num = scalar(arg()).num();
+                            break 'point pt.map(|v| func.div(ctx, v, num));
+                        }
+                        Op::Pow => todo!(),
+                        Op::Dot => {
+                            // ax * bx + ay * by
+                            let [a, b] =
+                                array_zip([scalar(arg()).pt(), scalar(arg()).pt()], |[lc, rc]| {
+                                    func.mul(ctx, lc, rc)
+                                });
+                            func.add(ctx, a, b)
+                        }
+                        Op::Point => break 'point [scalar(arg()).num(), scalar(arg()).num()],
+                        Op::IndexNumberList | Op::IndexPointList | Op::IndexPolygonList => {
+                            let l = list(arg());
+                            let idx = scalar(arg()).num();
+                            return l.index(func, ctx, idx);
+                        }
+                        Op::Ln => func.ln(ctx, scalar(arg()).num()),
+                        Op::Exp => func.exp(ctx, scalar(arg()).num()),
+                        Op::Erf => todo!(),
+                        Op::Sin => func.sin(ctx, scalar(arg()).num()),
+                        Op::Cos => func.cos(ctx, scalar(arg()).num()),
+                        Op::Tan => todo!(),
+                        Op::Sec => todo!(),
+                        Op::Csc => todo!(),
+                        Op::Cot => todo!(),
+                        Op::Sinh => todo!(),
+                        Op::Cosh => todo!(),
+                        Op::Tanh => todo!(),
+                        Op::Sech => todo!(),
+                        Op::Csch => todo!(),
+                        Op::Coth => todo!(),
+                        Op::Asin => todo!(),
+                        Op::Acos => todo!(),
+                        Op::Atan => todo!(),
+                        Op::Atan2 => todo!(),
+                        Op::Asec => todo!(),
+                        Op::Acsc => todo!(),
+                        Op::Acot => todo!(),
+                        Op::Asinh => todo!(),
+                        Op::Acosh => todo!(),
+                        Op::Atanh => todo!(),
+                        Op::Asech => todo!(),
+                        Op::Acsch => todo!(),
+                        Op::Acoth => todo!(),
+                        Op::Abs => todo!(),
+                        Op::Sgn => todo!(),
+                        Op::Round => todo!(),
+                        Op::RoundWithPrecision => todo!(),
+                        Op::Floor => todo!(),
+                        Op::Ceil => todo!(),
+                        Op::Mod => todo!(),
+                        Op::Midpoint => todo!(),
+                        Op::Distance => todo!(),
+                        Op::Min => todo!(),
+                        Op::Max => todo!(),
+                        Op::Median => todo!(),
+                        Op::TotalNumber => todo!(),
+                        Op::TotalPoint => todo!(),
+                        Op::MeanNumber => todo!(),
+                        Op::MeanPoint => todo!(),
+                        Op::CountNumber => todo!(),
+                        Op::CountPoint => todo!(),
+                        Op::CountPolygon => todo!(),
+                        Op::UniqueNumber => todo!(),
+                        Op::UniquePoint => todo!(),
+                        Op::UniquePolygon => todo!(),
+                        Op::Sort => todo!(),
+                        Op::SortKeyNumber => todo!(),
+                        Op::SortKeyPoint => todo!(),
+                        Op::SortKeyPolygon => todo!(),
+                        Op::Polygon => todo!(),
+                        Op::JoinNumber => todo!(),
+                        Op::JoinPoint => todo!(),
+                        Op::JoinPolygon => todo!(),
+                        _ => unreachable!(),
+                    });
+                })
+            }
+        },
     }
 }
 

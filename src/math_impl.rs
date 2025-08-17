@@ -71,7 +71,7 @@ pub struct NanCheck {
 #[derive(Debug, Clone, Copy)]
 pub struct Float32 {
     /// value of this [`Float32`]. Do not use directly without a NaN-check if [`Float32::mode`] is [`MathMode::Checked`]
-    value: Handle<Expression>,
+    pub(crate) value: Handle<Expression>,
     /// The checking mode this value was produced under, as well as metadata containing tracking information
     mode: Metadata,
 }
@@ -82,10 +82,14 @@ impl Float32 {
             mode: Metadata::AssumeFinite,
         }
     }
+
     fn is_assume_finite(&self) -> bool {
         matches!(self.mode, Metadata::AssumeFinite)
     }
-    fn get_or_materialize_check(&mut self, func: &mut CompilingFunction) -> Handle<Expression> {
+    pub(crate) fn get_or_materialize_check(
+        &mut self,
+        func: &mut CompilingFunction,
+    ) -> Handle<Expression> {
         match &mut self.mode {
             Metadata::AssumeFinite => {
                 // unconditionally assume finite, cannot track source without check
@@ -214,18 +218,73 @@ impl CompilingFunction {
                 left,
                 right,
             });
-            cond = self.add_unspanned(Expression::Select {
-                condition: nanck,
-                accept: self.consts.false_bool,
-                reject: cond,
+            let not = self.add_unspanned(Expression::Unary {
+                op: naga::UnaryOperator::LogicalNot,
+                expr: nanck,
+            });
+            cond = self.add_unspanned(Expression::Binary {
+                op: naga::BinaryOperator::And,
+                left: cond,
+                right: not,
             });
         }
         cond
     }
+    pub(crate) fn select(
+        &mut self,
+        ctx: &Compiler,
+        test: Handle<Expression>,
+        mut accept: Float32,
+        mut reject: Float32,
+    ) -> Float32 {
+        let value = self.add_unspanned(Expression::Select {
+            condition: test,
+            accept: accept.value,
+            reject: reject.value,
+        });
+        let mut mode = Metadata::AssumeFinite;
+        if ctx.config.numeric.assume_nan_supported() && !ctx.config.numeric.do_nan_tracking {
+            mode = Metadata::Tracked(None);
+        } else if matches!(
+            ctx.config.numeric.nan_check_mode,
+            NanCheckMode::PortabilityMode { .. }
+        ) {
+            let acheck = accept.get_or_materialize_check(self);
+            let rcheck = reject.get_or_materialize_check(self);
+            let sel_is_nan = self.add_unspanned(Expression::Select {
+                condition: test,
+                accept: acheck,
+                reject: rcheck,
+            });
+            let mut sel_src = None;
+            if ctx.config.numeric.do_nan_tracking {
+                sel_src = Some(
+                    match (
+                        accept.get_or_materialize_source(self),
+                        reject.get_or_materialize_source(self),
+                    ) {
+                        (None, None) => self.consts.zero_u32,
+                        (None, Some(r)) => r,
+                        (Some(l), None) => l,
+                        (Some(l), Some(r)) => self.add_unspanned(Expression::Select {
+                            condition: test,
+                            accept: l,
+                            reject: r,
+                        }),
+                    },
+                );
+            }
+            mode = Metadata::Tracked(Some(NanCheck {
+                is_nan: sel_is_nan,
+                source: sel_src,
+            }));
+        }
+        Float32 { value, mode }
+    }
     pub(crate) fn new_literal(&mut self, val: f32) -> ScalarValue {
-        ScalarValue::Number(if val.is_nan() || val.is_infinite() {
+        ScalarValue::Number(if !val.is_finite() {
             Float32 {
-                value: self.consts.one_f32,
+                value: self.consts.zero_f32,
                 mode: Metadata::Tracked(Some(NanCheck {
                     is_nan: self.consts.true_bool,
                     source: None,

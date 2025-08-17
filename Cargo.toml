@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-parse = { git = "https://github.com/fadaaszhi/ambavia", rev = "d12430221796499bfd34ac006985497a94e56b31" }
+parse = { git = "https://github.com/fadaaszhi/ambavia", rev = "8f9b16a4cf3d44dba0764dedcf45e9fab4987869" }
 naga = { version = "26.0.0", features = ["msl-out", "hlsl-out"] }
 typed-index-collections = "3.3.0"
 replace_with = "0.1.8"
+
 [dev-dependencies]
 wgpu = { version = "26.0.1", features = ["naga-ir"] }
 pollster = "0.4.0"

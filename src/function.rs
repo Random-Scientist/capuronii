@@ -7,12 +7,13 @@ use std::{
 use naga::{
     Block, Expression, Function, FunctionArgument, Handle, LocalVariable, Span, Statement, Type,
 };
-use parse::type_checker::{self, BaseType};
+use parse::type_checker::{self, BaseType, TypedExpression};
 
 use crate::{
     ArenaExt, Compiler, POINT_SIZE, ScalarValue,
     alloc::{Allocation, StaticAlloc},
-    collect_list, compile_scalar,
+    array_zip, collect_list, compile_scalar,
+    listdef::ListDef,
     math_impl::Float32,
 };
 
@@ -453,6 +454,25 @@ impl CompilingFunction {
             }
         }
     }
+    pub(crate) fn select_scalar(
+        &mut self,
+        ctx: &Compiler,
+        test: Handle<naga::Expression>,
+        accept: ScalarValue,
+        reject: ScalarValue,
+    ) -> ScalarValue {
+        match (accept, reject) {
+            (ScalarValue::Number(accept), ScalarValue::Number(reject)) => {
+                ScalarValue::Number(self.select(ctx, test, accept, reject))
+            }
+            (ScalarValue::Point(accept), ScalarValue::Point(reject)) => {
+                ScalarValue::Point(array_zip([accept, reject], |[at, rt]| {
+                    self.select(ctx, test, at, rt)
+                }))
+            }
+            _ => unreachable!(),
+        }
+    }
     pub(crate) fn done(mut self, ctx: &mut Compiler, ret: ScalarValue) -> Function {
         self.pop_frame();
         let s = self.size_of_scalar(ret.ty());
@@ -491,6 +511,16 @@ impl CompilingFunction {
             left: idx,
             right: self.size_of_scalar(ty),
         })
+    }
+    pub(crate) fn nan_value_for_ty(&mut self, val: BaseType) -> ScalarValue {
+        let nan = self.new_literal(f32::NAN);
+        match val {
+            BaseType::Number => nan,
+            BaseType::Point => ScalarValue::Point([nan.num(); 2]),
+            BaseType::Polygon => todo!(),
+            BaseType::Bool => todo!(),
+            BaseType::Empty => todo!(),
+        }
     }
     pub(crate) fn len_from_size(
         &mut self,

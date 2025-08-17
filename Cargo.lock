@@ -601,7 +601,7 @@ dependencies = [
 [[package]]
 name = "parse"
 version = "0.1.0"
-source = "git+https://github.com/fadaaszhi/ambavia?rev=d12430221796499bfd34ac006985497a94e56b31#d12430221796499bfd34ac006985497a94e56b31"
+source = "git+https://github.com/fadaaszhi/ambavia?rev=8f9b16a4cf3d44dba0764dedcf45e9fab4987869#8f9b16a4cf3d44dba0764dedcf45e9fab4987869"
 dependencies = [
  "derive_more",
  "logos",
