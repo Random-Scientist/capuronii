@@ -197,7 +197,6 @@ impl Compiler {
             ty: arr_ty,
             init: None,
         });
-
         let global_assignments = global_assignments.into_iter().map(|v| (v.id, v)).collect();
         Self {
             module,
@@ -250,7 +249,14 @@ impl Compiler {
 }
 
 pub fn compile(expr: &TypedExpression) -> Module {
-    let mut ctx = Compiler::new(Default::default(), ti_vec![]);
+    let config = CompilerConfig {
+        numeric: NumericConfig {
+            do_nan_tracking: false,
+            nan_check_mode: math_impl::NanCheckMode::AssumeFinite,
+        },
+        ..Default::default()
+    };
+    let mut ctx = Compiler::new(config, ti_vec![]);
     ctx.compile_expr(expr);
     ctx.module
 }
@@ -371,7 +377,7 @@ fn compile_scalar(
     expr: &TypedExpression,
 ) -> ScalarValue {
     match &expr.e {
-        type_checker::Expression::Number(v) => func.new_literal(*v as f32),
+        type_checker::Expression::Number(v) => func.new_literal(ctx, *v as f32),
         type_checker::Expression::Identifier(i) => {
             assert!(!expr.ty.is_list());
             let ty = expr.ty.base();

@@ -503,8 +503,8 @@ impl CompilingFunction {
             right: self.size_of_scalar(ty),
         })
     }
-    pub(crate) fn nan_value_for_ty(&mut self, val: BaseType) -> ScalarValue {
-        let nan = self.new_literal(f32::NAN);
+    pub(crate) fn nan_value_for_ty(&mut self, ctx: &Compiler, val: BaseType) -> ScalarValue {
+        let nan = self.new_literal(ctx, f32::NAN);
         match val {
             BaseType::Number => nan,
             BaseType::Point => ScalarValue::Point([nan.num(); 2]),

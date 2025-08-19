@@ -517,7 +517,7 @@ impl ListDef<'_> {
             left: check,
             right: boundck,
         });
-        let nan = func.nan_value_for_ty(self.ty);
+        let nan = func.nan_value_for_ty(ctx, self.ty);
         let indexed = self.index_direct(&mut func, ctx, idx);
         func.select_scalar(ctx, check, indexed, nan)
     }

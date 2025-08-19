@@ -82,6 +82,12 @@ impl Float32 {
             mode: Metadata::AssumeFinite,
         }
     }
+    pub(crate) fn new_supported(value: Handle<Expression>) -> Self {
+        Self {
+            value,
+            mode: Metadata::Tracked(None),
+        }
+    }
 
     fn is_assume_finite(&self) -> bool {
         matches!(self.mode, Metadata::AssumeFinite)
@@ -281,14 +287,22 @@ impl CompilingFunction {
         }
         Float32 { value, mode }
     }
-    pub(crate) fn new_literal(&mut self, val: f32) -> ScalarValue {
+    pub(crate) fn new_literal(&mut self, ctx: &Compiler, val: f32) -> ScalarValue {
+        let nbits = self.bitcast_to_float(self.consts.canonical_nan);
         ScalarValue::Number(if !val.is_finite() {
-            Float32 {
-                value: self.consts.zero_f32,
-                mode: Metadata::Tracked(Some(NanCheck {
-                    is_nan: self.consts.true_bool,
-                    source: None,
-                })),
+            if ctx.config.numeric.assume_nan_supported() {
+                Float32::new_supported(nbits)
+            } else if ctx.config.numeric.assume_floats_finite() {
+                // let the ub (useless behavior) commence
+                Float32::new_assume_finite(nbits)
+            } else {
+                Float32 {
+                    value: self.consts.zero_f32,
+                    mode: Metadata::Tracked(Some(NanCheck {
+                        is_nan: self.consts.true_bool,
+                        source: None,
+                    })),
+                }
             }
         } else {
             Float32 {

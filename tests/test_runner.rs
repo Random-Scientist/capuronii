@@ -20,7 +20,7 @@ use wgpu::{
 fn test_main() {
     env_logger::builder()
         .is_test(true)
-        .parse_filters("capuronii")
+        .parse_filters("capuronii,test")
         .format_module_path(false)
         .format_file(true)
         .format_line_number(true)
@@ -195,13 +195,19 @@ fn test_main() {
         download_staging.unmap();
         r
     };
-    dbg!(&test_case("[1,2,3][1]")[0]);
-    dbg!(&test_case("[1,2,3,4][[1,2,3]>2][1]")[0]);
-    dbg!(&test_case("[1,2,3,4][ [ ([1,2][[1,2]> 1])[1] , 2 , 3] > 2 ][1]")[0]);
-    dbg!(
-        &test_case(
-            r"[ (a, \{ b > 2: [1,2,3,4], a > 2: [4,3,2,1], 1 \}[2] ) \operatorname{for} a = [1,2,3,4], b = [1,3,5] ][2]"
-        )[0..2]
+    assert_eq!(test_case("[1,2,3][1]")[0], 1.0);
+    assert_eq!(test_case("[1,2,3,4][[1,2,3]>2][1]")[0], 3.0);
+    assert_eq!(
+        test_case("[1,2,3,4][ [ ([1,2][[1,2]> 1])[1] , 2 , 3] > 2 ][1]")[0],
+        3.0
     );
-    dbg!(&test_case("[1][2]")[0]);
+    assert_eq!(
+        test_case(
+            r"[(a, \{ b > 2: [1, 2, 3, 4], a > 2: [4, 3, 2, 1], 1 \}[2]) \for a = [1, 2, 3, 4], b = [1, 3, 5]][2]"
+        )[0..2],
+        [2.0, 1.0]
+    );
+    let t = test_case("[1][2]")[0];
+    dbg!(t);
+    assert!(!t.is_finite());
 }
