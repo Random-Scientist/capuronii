@@ -4,6 +4,7 @@ use std::{
     panic::Location,
 };
 
+use log::trace;
 use naga::{
     Block, Expression, Function, FunctionArgument, Handle, LocalVariable, Span, Statement, Type,
 };
@@ -278,11 +279,7 @@ impl CompilingFunction {
     #[track_caller]
     pub(crate) fn add_unspanned(&mut self, expr: naga::Expression) -> Handle<naga::Expression> {
         let ret = self.func.expressions.add_unspanned(expr);
-        println!(
-            "added expression {:#?}, location: {}",
-            ret,
-            Location::caller()
-        );
+        trace!("added expression {:#?}", ret);
         ret
     }
     #[track_caller]
@@ -343,11 +340,9 @@ impl CompilingFunction {
             return;
         }
         let range = self.func.expressions.range_from(self.last_emit);
-        println!(
-            "emit({:#?}) called, location: {}",
-            range.clone(),
-            Location::caller()
-        );
+
+        trace!("emit({:#?}) called", range.clone());
+
         self.func.body.push(Statement::Emit(range), Span::UNDEFINED);
         self.last_emit = self.func.expressions.len();
     }
@@ -394,11 +389,7 @@ impl CompilingFunction {
             self.func
                 .local_variables
                 .add_unspanned(LocalVariable { name, ty, init });
-        println!(
-            "created local {:#?} at {}",
-            local_handle,
-            Location::caller()
-        );
+        trace!("created local {:#?}", local_handle);
         self.add_preemit(Expression::LocalVariable(local_handle))
     }
     pub(crate) fn new_local_index(&mut self, ctx: &Compiler) -> Handle<Expression> {
@@ -414,7 +405,7 @@ impl CompilingFunction {
         id: usize,
         scalar: BaseType,
     ) -> Handle<naga::Expression> {
-        println!("assignment: {id}, ty: {scalar:#?}");
+        trace!("assignment: {id}, ty: {scalar:#?}");
         let s = ctx.scalar_type_repr(scalar);
         if let crate::Assignment::Scalar(s) = ctx.assignments.entry(id).or_insert_with(|| {
             crate::Assignment::Scalar(self.new_local(

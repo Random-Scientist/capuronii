@@ -8,7 +8,17 @@ parse = { git = "https://github.com/fadaaszhi/ambavia", rev = "8f9b16a4cf3d44dba
 naga = { version = "26.0.0", features = ["msl-out", "hlsl-out"] }
 typed-index-collections = "3.3.0"
 replace_with = "0.1.8"
+log = "0.4.27"
+
 
 [dev-dependencies]
-wgpu = { version = "26.0.1", features = ["naga-ir"] }
+wgpu = { version = "26.0.1", default-features = false, features = [
+    "std",
+    "dx12",
+    "metal",
+    "vulkan",
+    "parking_lot",
+    "naga-ir",
+] }
 pollster = "0.4.0"
+env_logger = "0.11.8"

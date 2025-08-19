@@ -24,9 +24,6 @@ mod listdef;
 mod math_impl;
 mod symath;
 
-#[cfg(test)]
-mod test;
-
 pub(crate) const POINT_SIZE: u32 = 2;
 #[derive(Debug, Clone, Copy)]
 pub enum ScalarValue {

@@ -1,6 +1,8 @@
 use std::iter::once;
 
 use capuronii::compile;
+use env_logger::Env;
+use log::{debug, set_logger};
 use naga::valid::Validator;
 use parse::{
     ast_parser::parse_expression_list_entry, latex_parser, name_resolver::resolve_names,
@@ -16,6 +18,15 @@ use wgpu::{
 
 #[test]
 fn test_main() {
+    env_logger::builder()
+        .is_test(true)
+        .parse_filters("capuronii")
+        .format_module_path(false)
+        .format_file(true)
+        .format_line_number(true)
+        .format_target(false)
+        .init();
+
     let instance = wgpu::Instance::new(&Default::default());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     if !adapter
@@ -124,11 +135,11 @@ fn test_main() {
         let (checked, _) = type_check(&a);
         let expr = &checked.first().unwrap().value;
         let module = compile(expr);
-        dbg!(&checked);
+        debug!("compiled expressions: {:?}", &checked);
 
         let mut v = Validator::new(Default::default(), Default::default());
         let info = v.validate(&module).unwrap();
-        println!(
+        debug!(
             "Compiled MSL: {}",
             naga::back::msl::write_string(&module, &info, &Default::default(), &Default::default(),)
                 .unwrap()
@@ -192,4 +203,5 @@ fn test_main() {
             r"[ (a, \{ b > 2: [1,2,3,4], a > 2: [4,3,2,1], 1 \}[2] ) \operatorname{for} a = [1,2,3,4], b = [1,3,5] ][2]"
         )[0..2]
     );
+    dbg!(&test_case("[1][2]")[0]);
 }
